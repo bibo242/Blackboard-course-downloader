@@ -1,6 +1,6 @@
 # KFUPM Blackboard Course Downloader
 
-The KFUPM Blackboard Course Downloader is a user-friendly desktop application designed to access your KFUPM Blackboard page and download entire course materials. It works by intelligently scraping the Blackboard website, saving you the tedious task of manually clicking and downloading every file.
+The KFUPM Blackboard Course Downloader is a user-friendly desktop application designed to access your KFUPM Blackboard page and download entire course materials. It works by scraping the Blackboard website, saving you the tedious task of manually clicking and downloading every file.
 
 This tool is perfect for backing up course materials, whether you want to revise from them later or archive them for future students to utilize. It preserves the original folder structure from Blackboard, ensuring everything is perfectly organized.
 
@@ -21,7 +21,7 @@ This tool is perfect for backing up course materials, whether you want to revise
 
 ---
 
-## 🚀 How to Use the Application (`.exe`)
+##  How to Use the Application (`.exe`)
 
 This is the recommended method for most users. No installation is required!
 
@@ -44,7 +44,6 @@ This is the recommended method for most users. No installation is required!
     - Click **"Download Selected Course(s)"** and watch the magic happen!
 
 ### System Requirements
-- Windows 10 or 11.
 - An active internet connection.
 - [Google Chrome](https://www.google.com/chrome/) or [Mozilla Firefox](https://www.mozilla.org/firefox/) must be installed on your system.
 
