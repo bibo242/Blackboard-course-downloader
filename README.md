@@ -27,7 +27,7 @@ This tool is perfect for backing up course materials, whether you want to revise
 This is the recommended method for most users. No installation is required!
 
 1.  **Download the latest release.**
-    - Go to the [**Releases Page**](https://github.com/your-username/your-repo-name/releases).
+    - Go to the [**Releases Page**](https://github.com/bibo242/Blackboard-course-downloader/releases).
     - Under the latest version, download the `course_downloader.exe` file from the "Assets" section.
 
 2.  **Run the application.**
@@ -40,7 +40,7 @@ This is the recommended method for most users. No installation is required!
     - Click **"Scan Courses"**. The application will log in and find all your courses, displaying them in the listbox.
 
 4.  **Download.**
-    - Select the course(s) you want to download from the list. You can use `Ctrl + Click` to select multiple courses.
+    - Select the course(s) you want to download from the list.
     - Choose a download destination folder.
     - Click **"Download Selected Course(s)"** and watch the magic happen!
 
@@ -57,12 +57,12 @@ This method is for developers who want to run the Python script directly.
 1.  **Clone the repository.**
     Open your terminal or Git Bash and run:
     ```bash
-    git clone https://github.com/your-username/your-repo-name.git
+    git clone https://github.com/bibo242/Blackboard-course-downloader.git
     ```
 
 2.  **Navigate to the project folder.**
     ```bash
-    cd your-repo-name
+    cd Blackboard-course-downloader
     ```
 
 3.  **(Optional but Recommended) Create and activate a virtual environment.**
@@ -89,4 +89,4 @@ This method is for developers who want to run the Python script directly.
 
 ##  Disclaimer
 
-This tool is provided for educational and personal use only. The user is solely responsible for complying with all terms of service of King Fahd University of Petroleum & Minerals (KFUPM) and Blackboard. Your KFUPM credentials are used locally to log into Blackboard and are not stored or transmitted elsewhere. Use this tool at your own risk.
+This tool is provided for educational and personal use only. The user is solely responsible for complying with all terms of service of King Fahd University of Petroleum & Minerals (KFUPM) and Blackboard. Your KFUPM credentials are used locally to log into Blackboard and are not stored or transmitted elsewhere.
