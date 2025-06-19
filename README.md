@@ -4,6 +4,8 @@ The KFUPM Blackboard Course Downloader is a user-friendly desktop application de
 
 This tool is perfect for backing up course materials, whether you want to revise from them later or archive them for future students to utilize. It preserves the original folder structure from Blackboard, ensuring everything is perfectly organized.
 
+_Note: it will probably work for you if you're from another university that uses Blackboard but you have to change the URL in the code_
+
  
 ![image](https://github.com/user-attachments/assets/8bd239d3-d8fd-4224-addf-e9aaf624bc3c)
 ![Screenshot from 2025-06-18 15-34-27](https://github.com/user-attachments/assets/a8b1a615-a89e-4943-8b7d-3f867cc6eafd)
