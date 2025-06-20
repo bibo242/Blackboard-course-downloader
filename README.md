@@ -1,5 +1,22 @@
 # KFUPM Blackboard Course Downloader
 
+---
+<h2 align="center"> Downloads </h2>
+
+
+<div align="center">
+  <a href="https://github.com/bibo242/Blackboard-course-downloader/releases/latest/download/course_downloaderv1.1.exe" title="Download Latest Release (.exe)">
+    <img src="https://img.shields.io/badge/DOWNLOAD%20LATEST%20RELEASE%20(.EXE)-brightgreen?style=for-the-badge&logo=windows&logoColor=white" alt="Download Latest Release (.exe)">
+  </a>
+</div>
+
+---
+
+
+
+
+
+
 The KFUPM Blackboard Course Downloader is a user-friendly desktop application designed to access your KFUPM Blackboard page and download entire course materials. It works by scraping the Blackboard website, saving you the tedious task of manually clicking and downloading every file.
 
 This tool is perfect for backing up course materials, whether you want to revise from them later or archive them for future students to utilize. It preserves the original folder structure from Blackboard, ensuring everything is perfectly organized.
