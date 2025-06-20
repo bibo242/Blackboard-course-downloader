@@ -1,16 +1,21 @@
 # KFUPM Blackboard Course Downloader
 
 ---
-<h2 align="center"> Downloads </h2>
-
+<h2 align="center">Downloads</h2>
 
 <div align="center">
   <a href="https://github.com/bibo242/Blackboard-course-downloader/releases/latest/download/course_downloaderv1.1.exe" title="Download Latest Release (.exe)">
     <img src="https://img.shields.io/badge/DOWNLOAD%20LATEST%20RELEASE%20(.EXE)-brightgreen?style=for-the-badge&logo=windows&logoColor=white" alt="Download Latest Release (.exe)">
   </a>
+  <p align="center"><small><em>(Note: Windows might show a "Windows protected your PC" security warning. Click "More info" and then "Run anyway".)</em></small></p>
+  <p align="center"><small><em>This happens because the app isn't yet code-signed (a process that verifies the publisher).</em></small></p>
+  <p align="center"><small>View all versions on the <a href="https://github.com/bibo242/Blackboard-course-downloader/releases/latest">Releases Page</a>.</small></p>
 </div>
 
 ---
+<br>
+
+(Rest of your README content starts here)
 
 
 
