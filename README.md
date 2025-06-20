@@ -1,7 +1,7 @@
 # KFUPM Blackboard Course Downloader
 
 ---
-<h2 align="center">Downloads</h2>
+<h2 align="center">Downloads | التحميل</h2>
 
 <div align="center">
   <a href="https://github.com/bibo242/Blackboard-course-downloader/releases/latest/download/course_downloaderv1.1.exe" title="Download Latest Release (.exe)">
