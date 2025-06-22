@@ -73,6 +73,8 @@ This is the recommended method for most users. No installation is required!
 ### System Requirements
 - An active internet connection.
 - [Google Chrome](https://www.google.com/chrome/) or [Mozilla Firefox](https://www.mozilla.org/firefox/) must be installed on your system.
+- Your terms that you want to download must be set to "Show Term" on the Blackboard website ![image](https://github.com/user-attachments/assets/5f7500af-da33-4562-83a8-655798b69890)
+
 
 ---
 
