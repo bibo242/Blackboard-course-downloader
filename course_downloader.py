@@ -142,7 +142,8 @@ def get_all_terms_and_courses(driver, status_callback):
                     # Continue processing, maybe courses are already visible or another issue
 
             # Using the CSS selector for course elements from your original code
-            course_elements = course_container.find_elements(By.CSS_SELECTOR, "ul.courseListing li a")
+            course_elements = course_container.find_elements(By.CSS_SELECTOR, "ul.courseListing li > a:not(.courseDataBlock a)")
+
             
             courses_in_term = []
             for el in course_elements:
