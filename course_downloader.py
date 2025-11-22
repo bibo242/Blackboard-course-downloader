@@ -4,9 +4,15 @@ import getpass
 import re
 import requests
 import shutil
+import threading
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-import threading
+import customtkinter as ctk
+
+ctk.set_appearance_mode("Dark")
+ctk.set_default_color_theme("blue")
+
+
 
 # --- Selenium Imports (for multi-browser support) ---
 from selenium import webdriver
@@ -143,7 +149,6 @@ def get_all_terms_and_courses(driver, status_callback):
 
             # Using the CSS selector for course elements from your original code
             course_elements = course_container.find_elements(By.CSS_SELECTOR, "ul.courseListing li > a:not(.courseDataBlock a)")
-
             
             courses_in_term = []
             for el in course_elements:
@@ -482,126 +487,158 @@ def process_content_list(session, base_course_dir, content_list, progress_callba
 
 
 # --- GUI Application Class (largely unchanged from your previous version with my UI tweaks) ---
-class App:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("Blackboard Course Downloader")
-        self.root.geometry("750x700") 
+class App(ctk.CTk):
+    def __init__(self):
+        super().__init__()
+        self.title("Blackboard Course Downloader")
+        self.geometry("700x1000")
         self.all_course_data = []
+        self.resizable(0,0)
 
-        main_frame = ttk.Frame(root, padding="10")
-        main_frame.pack(fill=tk.BOTH, expand=True)
+        # Configure grid layout (1x1)
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(0, weight=1)
+
+        main_frame = ctk.CTkFrame(self)
+        main_frame.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
 
         # --- UI Widgets setup ---
+        self.main_font = ctk.CTkFont(family="Roboto Medium", size=12)
+        self.header_font = ctk.CTkFont(family="Roboto Medium", size=13, weight="bold")
+        self.button_font = ctk.CTkFont(family="Roboto Medium", size=14, weight="bold") # New font for buttons
+        
         row_idx = 0 # Keeps track of the current grid row
 
+        # Configure columns for the main frame to ensure alignment
+        # Column 0: Labels (Fixed width/content)
+        # Column 1: Entries (Expands)
+        # Column 2: Browse Button (Fixed width)
+        main_frame.grid_columnconfigure(0, weight=0) # Labels don't expand
+        main_frame.grid_columnconfigure(1, weight=1) # Entries expand
+        main_frame.grid_columnconfigure(2, weight=0) # Button doesn't expand
+
         # Username
-        ttk.Label(main_frame, text="Username:").grid(row=row_idx, column=0, sticky="w", pady=2)
-        self.username_entry = ttk.Entry(main_frame, width=40)
-        self.username_entry.grid(row=row_idx, column=1, columnspan=2, sticky="ew", pady=2) # columnspan 2 to align with browse button
+        ctk.CTkLabel(main_frame, text="Username", font=self.header_font, text_color=("gray10", "gray90")).grid(row=row_idx, column=0, sticky="w", pady=(0, 5))
+        self.username_entry = ctk.CTkEntry(main_frame, width=200, font=self.main_font)
+        self.username_entry.grid(row=row_idx, column=1, columnspan=2, sticky="ew", pady=(0, 5), padx=(5, 0))
         row_idx += 1
 
         # Password
-        ttk.Label(main_frame, text="Password:").grid(row=row_idx, column=0, sticky="w", pady=2)
-        self.password_entry = ttk.Entry(main_frame, width=40, show="*")
-        self.password_entry.grid(row=row_idx, column=1, columnspan=2, sticky="ew", pady=2)
+        ctk.CTkLabel(main_frame, text="Password", font=self.header_font, text_color=("gray10", "gray90")).grid(row=row_idx, column=0, sticky="w", pady=(0, 5))
+        self.password_entry = ctk.CTkEntry(main_frame, width=200, show="*", font=self.main_font)
+        self.password_entry.grid(row=row_idx, column=1, columnspan=2, sticky="ew", pady=(0, 5), padx=(5, 0))
         row_idx += 1
 
-        # Download To
-        ttk.Label(main_frame, text="Download To:").grid(row=row_idx, column=0, sticky="w", pady=2)
+        # Download Path (Isolated Frame for Robustness)
+        # We use a separate frame spanning all columns to ensure the button layout is isolated from the main grid's resizing logic.
+        path_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
+        path_frame.grid(row=row_idx, column=0, columnspan=3, sticky="ew", pady=(0, 5))
+        
+        # Configure grid within path_frame
+        path_frame.grid_columnconfigure(0, weight=0) # Label
+        path_frame.grid_columnconfigure(1, weight=1) # Entry
+        path_frame.grid_columnconfigure(2, weight=0) # Button
+
+        # Label (Col 0) - Matches main grid Col 0 alignment
+        ctk.CTkLabel(path_frame, text="Download To", font=self.header_font, text_color=("gray10", "gray90")).grid(row=0, column=0, sticky="w", padx=(0, 5))
+        
+        # Entry (Col 1)
         self.path_var = tk.StringVar(value=os.path.join(os.path.expanduser("~"), "Desktop", "KFUPM_Blackboard_Downloads"))
-        self.path_entry = ttk.Entry(main_frame, textvariable=self.path_var, width=40)
-        self.path_entry.grid(row=row_idx, column=1, sticky="ew", pady=2)
-        self.browse_button = ttk.Button(main_frame, text="Browse...", command=self.browse_directory)
-        self.browse_button.grid(row=row_idx, column=2, padx=(5,0), pady=2, sticky="ew") # padx right 0
+        self.path_entry = ctk.CTkEntry(path_frame, textvariable=self.path_var, font=self.main_font)
+        self.path_entry.grid(row=0, column=1, sticky="ew", padx=(5, 5)) # Right padding to separate from button
+
+        # Browse Button (Col 2)
+        self.browse_button = ctk.CTkButton(path_frame, text="Browse", width=80, command=self.browse_directory, font=self.button_font)
+        self.browse_button.grid(row=0, column=2, sticky="ew", padx=(0, 0))
+        
+        # Force button to top layer to prevent any clipping issues
+        self.browse_button.lift()
+        
         row_idx += 1
 
         # Browser Selection Frame
-        browser_frame = ttk.LabelFrame(main_frame, text="Browser for Automation (must be installed)")
-        browser_frame.grid(row=row_idx, column=0, columnspan=3, sticky="ew", pady=(10,5), padx=2)
-        self.browser_var = tk.StringVar(value="firefox") 
-        self.firefox_rb = ttk.Radiobutton(browser_frame, text="Use Firefox", variable=self.browser_var, value="firefox")
-        self.firefox_rb.pack(side="left", padx=10, pady=5)
-        self.chrome_rb = ttk.Radiobutton(browser_frame, text="Use Chrome", variable=self.browser_var, value="chrome")
-        self.chrome_rb.pack(side="left", padx=10, pady=5)
-        row_idx += 1
+        browser_frame = ctk.CTkFrame(main_frame)
+        browser_frame.grid(row=row_idx, column=0, columnspan=3, sticky="ew", pady=10, padx=2)
+        # Explicitly set text_color to ensure visibility in dark mode
+        # Left aligned
+        ctk.CTkLabel(browser_frame, text="Browser for Automation (must be installed)", font=self.header_font, text_color=("gray10", "gray90")).pack(side="top", anchor="w", pady=5, padx=5)
         
-        # Headless Mode Checkbox
+        # Container for radio buttons (Left aligned)
+        rb_frame = ctk.CTkFrame(browser_frame, fg_color="transparent")
+        rb_frame.pack(side="top", anchor="w", pady=5, padx=5)
+
+        self.browser_var = tk.StringVar(value="firefox") 
+        self.firefox_rb = ctk.CTkRadioButton(rb_frame, text="Use Firefox", variable=self.browser_var, value="firefox", font=self.header_font, text_color=("gray10", "gray90"))
+        self.firefox_rb.pack(side="left", padx=(0, 20))
+        
+        self.chrome_rb = ctk.CTkRadioButton(rb_frame, text="Use Chrome", variable=self.browser_var, value="chrome", font=self.header_font, text_color=("gray10", "gray90"))
+        self.chrome_rb.pack(side="left", padx=0)
+        
+        row_idx += 1
+
+        # Headless Checkbox
         self.headless_var = tk.BooleanVar(value=True)
-        self.headless_check = ttk.Checkbutton(main_frame, text="Run in Headless Mode (no browser window visible - recommended)", variable=self.headless_var)
+        self.headless_check = ctk.CTkCheckBox(main_frame, text="Run in Headless Mode (no browser window visible - recommended)", variable=self.headless_var, font=self.header_font, text_color=("gray10", "gray90"))
         self.headless_check.grid(row=row_idx, column=0, columnspan=3, sticky="w", pady=5)
         row_idx += 1
 
-        # Scan Courses Button
-        self.scan_button = ttk.Button(main_frame, text="1. Scan Courses", command=self.start_scan_thread)
-        self.scan_button.grid(row=row_idx, column=0, columnspan=3, pady=10, sticky="ew")
+        # Scan Button
+        self.scan_button = ctk.CTkButton(main_frame, text="1. Scan Courses", command=self.start_scan_thread, font=self.button_font, height=40)
+        self.scan_button.grid(row=row_idx, column=0, columnspan=3, sticky="ew", pady=10)
         row_idx += 1
 
-        # Course Selection Label
-        ttk.Label(main_frame, text="Select Course(s) to Download (Ctrl/Shift to select multiple):").grid(row=row_idx, column=0, columnspan=3, sticky="w", pady=(10,2))
+        # Select Courses Label (Left aligned)
+        ctk.CTkLabel(main_frame, text="Select Course(s) to Download", font=self.header_font, text_color=("gray10", "gray90")).grid(row=row_idx, column=0, columnspan=3, sticky="w", pady=(10, 0))
         row_idx += 1
         
-        # Course Listbox and Scrollbar
-        listbox_frame = ttk.Frame(main_frame) # Frame to hold listbox and scrollbar
-        listbox_frame.grid(row=row_idx, column=0, columnspan=3, sticky="nsew")
-        listbox_frame.columnconfigure(0, weight=1)
-        listbox_frame.rowconfigure(0, weight=1)
-
-        self.course_listbox = tk.Listbox(listbox_frame, selectmode=tk.EXTENDED, height=10) 
-        self.course_listbox.grid(row=0, column=0, sticky="nsew")
+        # Course List (Scrollable Frame with Checkboxes)
+        # Ensure the frame has a fixed height or expands properly. 
+        # We set height to something reasonable so it scrolls if content exceeds it.
+        self.course_scroll_frame = ctk.CTkScrollableFrame(main_frame, label_text="Available Courses", label_font=self.header_font, height=200)
+        self.course_scroll_frame.grid(row=row_idx, column=0, columnspan=3, sticky="nsew", pady=5)
         
-        scrollbar = ttk.Scrollbar(listbox_frame, orient="vertical", command=self.course_listbox.yview)
-        scrollbar.grid(row=0, column=1, sticky="ns")
-        self.course_listbox.config(yscrollcommand=scrollbar.set)
+        # Explicitly bind scroll events for Linux (Button-4/5) and Windows (MouseWheel) to the canvas
+        # This helps if the default binding isn't catching focus properly
+        try:
+            canvas = self.course_scroll_frame._parent_canvas
+            canvas.bind_all("<Button-4>", lambda e: canvas.yview_scroll(-1, "units"))
+            canvas.bind_all("<Button-5>", lambda e: canvas.yview_scroll(1, "units"))
+            canvas.bind_all("<MouseWheel>", lambda e: canvas.yview_scroll(-1 * (e.delta // 120), "units"))
+        except Exception: pass
+
+        self.course_checkboxes = [] # To store checkbox widgets
         row_idx += 1
 
         # Download Button
-        self.download_button = ttk.Button(main_frame, text="2. Download Selected Course(s)", command=self.start_download_thread, state="disabled")
-        self.download_button.grid(row=row_idx, column=0, columnspan=3, pady=10, sticky="ew")
+        self.download_button = ctk.CTkButton(main_frame, text="2. Download Selected Course(s)", command=self.start_download_thread, state="disabled", height=40, font=self.button_font)
+        self.download_button.grid(row=row_idx, column=0, columnspan=3, pady=15, sticky="ew")
         row_idx += 1
 
         # Status & Logs Frame
-        status_frame = ttk.LabelFrame(main_frame, text="Status & Logs")
+        status_frame = ctk.CTkFrame(main_frame)
         status_frame.grid(row=row_idx, column=0, columnspan=3, sticky="nsew", pady=(10,0))
-        status_frame.columnconfigure(0, weight=1) # Text widget expands
-        status_frame.rowconfigure(0, weight=1) # Text widget expands
+        status_frame.columnconfigure(0, weight=1)
+        status_frame.rowconfigure(0, weight=1)
 
-        self.status_text = tk.Text(status_frame, height=10, state="disabled", wrap="word", relief=tk.SUNKEN, borderwidth=1)
+        self.status_text = ctk.CTkTextbox(status_frame, height=150, state="disabled", wrap="word", font=("Consolas", 11))
         self.status_text.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
-        status_scrollbar = ttk.Scrollbar(status_frame, orient="vertical", command=self.status_text.yview)
-        status_scrollbar.grid(row=0, column=1, sticky="ns", padx=5, pady=(5,0)) # Adjusted pady
-        self.status_text.config(yscrollcommand=status_scrollbar.set)
         row_idx +=1 
 
         # Progress Bar
-        self.progress_bar = ttk.Progressbar(main_frame, orient="horizontal", mode="determinate")
+        self.progress_bar = ctk.CTkProgressBar(main_frame, orientation="horizontal", mode="determinate")
         self.progress_bar.grid(row=row_idx, column=0, columnspan=3, sticky="ew", pady=(5,10))
+        self.progress_bar.set(0)
         row_idx += 1
 
-
         # --- Column and Row Configurations for main_frame ---
-        main_frame.columnconfigure(1, weight=1) # Allow entry fields (column 1) to expand horizontally
-
-        # Identify which rows should expand vertically.
-        # It's usually listboxes and text areas.
-        # The row index for course_listbox_frame is `row_idx - 4` (if current row_idx is correct after all placements)
-        # The row index for status_frame is `row_idx - 2`
+        main_frame.rowconfigure(9, weight=1)
         
-        # Let's count from the top for clarity:
-        # 0: Username
-        # 1: Password
-        # 2: Download To
-        # 3: Browser Frame
-        # 4: Headless Check
-        # 5: Scan Button
-        # 6: Course Selection Label
-        # 7: Listbox Frame (THIS IS THE ONE THAT NEEDS TO EXPAND)
-        # 8: Download Button
-        # 9: Status Frame (THIS IS THE OTHER ONE THAT NEEDS TO EXPAND)
-        # 10: Progress Bar
-
-        main_frame.rowconfigure(7, weight=1)  # Row containing the course_listbox_frame
-        main_frame.rowconfigure(9, weight=1)  # Row containing the status_frame
+        # Make the course list row expandable
+        # The course list is at a specific row index. Let's find it dynamically or hardcode if we know.
+        # Based on the code above:
+        # 0: Username, 1: Password, 2: Path, 3: Browser, 4: Headless, 5: Scan Button, 6: Label, 7: Course List
+        main_frame.rowconfigure(7, weight=1) 
+        main_frame.columnconfigure(1, weight=1)
         
         # Load saved settings (credentials, path, etc.)
         self.load_credentials()
@@ -611,8 +648,8 @@ class App:
         self._save_timer = None
 
     def save_credentials_throttled(self):
-        if self._save_timer: self.root.after_cancel(self._save_timer)
-        self._save_timer = self.root.after(1000, self.save_credentials) 
+        if self._save_timer: self.after_cancel(self._save_timer)
+        self._save_timer = self.after(1000, self.save_credentials) 
 
     def save_credentials(self):
         try:
@@ -652,24 +689,24 @@ class App:
             self.save_credentials() 
 
     def update_status(self, message):
-        if self.root and self.status_text: 
-            self.root.after(0, self._update_status_thread_safe, message)
+        if self and self.status_text: 
+            self.after(0, self._update_status_thread_safe, message)
     
     def _update_status_thread_safe(self, message):
         try:
-            self.status_text.config(state="normal")
+            self.status_text.configure(state="normal")
             self.status_text.insert(tk.END, message + "\n")
             self.status_text.see(tk.END)
-            self.status_text.config(state="disabled")
+            self.status_text.configure(state="disabled")
         except tk.TclError: pass # Handle if widget is destroyed
 
     def update_progress(self, value):
-        if self.root and self.progress_bar:
-             self.root.after(0, self._update_progress_thread_safe, value)
+        if self and self.progress_bar:
+             self.after(0, self._update_progress_thread_safe, value)
 
     def _update_progress_thread_safe(self, value):
         try:
-            self.progress_bar['value'] = value
+            self.progress_bar.set(value / 100)
         except tk.TclError: pass
 
     def set_ui_state(self, enabled):
@@ -680,20 +717,24 @@ class App:
             self.firefox_rb, self.chrome_rb
         ]
         for widget in widgets_to_toggle:
-            if widget: widget.config(state=state)
+            if widget: widget.configure(state=state)
         
         # Download button depends on courses being scanned
         if enabled and self.all_course_data:
-            self.download_button.config(state="normal")
+            self.download_button.configure(state="normal")
         else:
-            self.download_button.config(state="disabled")
+            self.download_button.configure(state="disabled")
 
     def start_scan_thread(self):
         self.set_ui_state(False)
-        self.course_listbox.delete(0, tk.END)
+        # Clear previous checkboxes
+        for cb in self.course_checkboxes:
+            cb.destroy()
+        self.course_checkboxes = []
+        
         self.all_course_data = [] # Clear previous scan results
         # Clear status text on new scan
-        self.status_text.config(state="normal"); self.status_text.delete(1.0, tk.END); self.status_text.config(state="disabled")
+        self.status_text.configure(state="normal"); self.status_text.delete(1.0, tk.END); self.status_text.configure(state="disabled")
         self.update_status("Scan initiated...")
         threading.Thread(target=self.scan_courses_task, daemon=True).start()
 
@@ -701,7 +742,7 @@ class App:
         username = self.username_entry.get(); password = self.password_entry.get()
         if not username or not password:
             messagebox.showerror("Input Error", "Username and Password are required.")
-            self.root.after(0, self.set_ui_state, True); return
+            self.after(0, self.set_ui_state, True); return
         
         self.save_credentials() 
         driver = None
@@ -723,20 +764,59 @@ class App:
                 self.all_course_data.sort(key=lambda x: x.get('term', 'Unknown Term'), reverse=True) # Then reverse by term for newest first
 
                 def update_listbox_ui():
-                    self.course_listbox.delete(0, tk.END) # Clear again before populating
-                    current_term_header = None # Use None to handle first term correctly
+                    # Clear again just in case
+                    for cb in self.course_checkboxes:
+                        if isinstance(cb, dict): cb['checkbox'].destroy()
+                        elif isinstance(cb, ctk.CTkCheckBox): cb.destroy()
+                        else: cb.destroy()
+                    self.course_checkboxes = []
+                    
+                    # Clear all children of scroll frame to be safe
+                    for child in self.course_scroll_frame.winfo_children():
+                        child.destroy()
+
+                    current_term_header = None 
+                    
+                    # Helper to toggle all checkboxes for a term
+                    def toggle_term(term_val, state_var):
+                        new_state = state_var.get()
+                        for item in self.course_checkboxes:
+                            if item['course_data'].get('term') == term_val:
+                                if new_state: item['checkbox'].select()
+                                else: item['checkbox'].deselect()
+
                     for course in self.all_course_data:
                         term = course.get('term', 'Unknown Term')
                         if term != current_term_header:
                             current_term_header = term
-                            self.course_listbox.insert(tk.END, f"--- {current_term_header} ---")
-                        self.course_listbox.insert(tk.END, f"  {course['name']}")
-                    self.download_button.config(state="normal") # Enable download if courses found
-                self.root.after(0, update_listbox_ui)
+                            # Term Header with Select All Checkbox
+                            term_var = tk.BooleanVar(value=False)
+                            term_cb = ctk.CTkCheckBox(self.course_scroll_frame, text=f"--- {current_term_header} ---", 
+                                                      variable=term_var, font=self.header_font, text_color=("gray10", "gray90"),
+                                                      command=lambda t=current_term_header, v=term_var: toggle_term(t, v))
+                            term_cb.pack(side="top", fill="x", padx=5, pady=(10, 2)) # Changed to pack top for vertical list
+                            
+                            # Container for courses in this term (Vertical Layout - Single Column)
+                            self.current_term_course_frame = ctk.CTkFrame(self.course_scroll_frame, fg_color="transparent")
+                            self.current_term_course_frame.pack(fill="x", padx=15, pady=2)
+                            # No column config needed for pack
+                            self.term_course_idx = 0
+
+                        # Add checkbox for the course
+                        course_name = course['name']
+                        cb = ctk.CTkCheckBox(self.current_term_course_frame, text=course_name, font=self.header_font, text_color=("gray10", "gray90"))
+                        # Revert to pack for single column vertical list
+                        cb.pack(fill="x", anchor="w", pady=2)
+                        
+                        self.course_checkboxes.append({"checkbox": cb, "course_data": course})
+                        self.term_course_idx += 1
+                        
+                    self.download_button.configure(state="normal") # Enable download if courses found
+                self.after(0, update_listbox_ui)
             else:
                 self.update_status("Scan complete: No terms or courses found. Please check your Blackboard or the selectors in the script if the page structure has changed.")
                 # Ensure download button is disabled if no courses
-                self.root.after(0, lambda: self.download_button.config(state="disabled"))
+                self.after(0, lambda: self.download_button.configure(state="disabled"))
 
         except RuntimeError as e: 
             self.update_status(f"Driver Error: {e}")
@@ -749,39 +829,26 @@ class App:
             if driver: 
                 try: driver.quit()
                 except Exception as e_quit: self.update_status(f"Note: Error quitting driver: {e_quit}")
-            self.root.after(0, self.set_ui_state, True)
+            self.after(0, self.set_ui_state, True)
             
     def start_download_thread(self):
-        selected_indices = self.course_listbox.curselection()
-        if not selected_indices:
+        selected_courses = []
+        for item in self.course_checkboxes:
+            if item["checkbox"].get() == 1:
+                selected_courses.append(item["course_data"])
+
+        if not selected_courses:
             messagebox.showwarning("No Selection", "Please select at least one course to download.")
             return
 
         self.set_ui_state(False)
         self.update_status("Download initiated...")
-        # Pass selected indices to the thread to avoid issues with GUI updates from worker thread
-        threading.Thread(target=self.download_courses_task, args=(list(selected_indices),), daemon=True).start()
+        # Pass selected courses directly
+        threading.Thread(target=self.download_courses_task, args=(selected_courses,), daemon=True).start()
 
-    def download_courses_task(self, selected_indices_tuple):
+    def download_courses_task(self, courses_to_process):
         username = self.username_entry.get(); password = self.password_entry.get()
         
-        courses_to_download_names = []
-        # ... (rest of course name gathering is fine) ...
-        for i in selected_indices_tuple:
-            try:
-                item_text = self.course_listbox.get(i).strip() 
-                if not item_text.startswith("---"): 
-                    courses_to_download_names.append(item_text)
-            except tk.TclError: 
-                self.update_status("Error: Course listbox changed during selection processing.")
-                self.root.after(0, self.set_ui_state, True); return
-        
-        if not courses_to_download_names:
-             messagebox.showerror("Error", "No valid courses selected from list.")
-             self.root.after(0, self.set_ui_state, True); return
-
-        courses_to_process = [c for c in self.all_course_data if c['name'] in courses_to_download_names]
-
         self.update_status(f"Starting download for {len(courses_to_process)} selected course(s)...")
         driver = None
         try:
@@ -797,7 +864,7 @@ class App:
 
             total_courses = len(courses_to_process)
             for course_idx, course in enumerate(courses_to_process):
-                self.root.after(0, self.update_progress, 0) 
+                self.after(0, self.update_progress, 0) 
                 
                 term_name_cleaned = course.get('term', 'Unknown_Term') 
                 course_name_cleaned = course['name'] 
@@ -873,7 +940,7 @@ class App:
                         if content_map_for_section:
                             self.update_status(f"      Found {len(content_map_for_section)} potential items in '{section_name_to_find}'. Processing downloads...")
                             process_content_list(session, base_course_download_dir, content_map_for_section, 
-                                                 lambda p_val: self.root.after(0, self.update_progress, p_val),
+                                                 lambda p_val: self.after(0, self.update_progress, p_val),
                                                  self.update_status)
                         else:
                             self.update_status(f"      No downloadable items or sub-folders found directly in '{section_name_to_find}'.")
@@ -910,10 +977,9 @@ class App:
             if driver: 
                 try: driver.quit()
                 except Exception as e_quit: self.update_status(f"Note: Error quitting driver post-download: {e_quit}")
-            self.root.after(0, self.set_ui_state, True)
-            self.root.after(0, self.update_progress, 0)
+            self.after(0, self.set_ui_state, True)
+            self.after(0, self.update_progress, 0)
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = App(root)
-    root.mainloop()
+    app = App()
+    app.mainloop()
