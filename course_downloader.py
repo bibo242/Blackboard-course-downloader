@@ -451,15 +451,32 @@ def process_content_list(session, base_course_dir, content_list, progress_callba
 
                     final_filepath = os.path.join(final_folder_path, final_filename_to_save)
                     
+                    # Check if file already exists
                     if os.path.exists(final_filepath):
                         try:
                             content_length = int(r.headers.get('content-length', 0))
-                            if content_length > 0 and os.path.getsize(final_filepath) == content_length:
-                                status_callback(f"          - SKIPPED (already exists with same size): {final_filename_to_save}")
+                            existing_size = os.path.getsize(final_filepath)
+                            
+                            if content_length > 0:
+                                # Server provided size - compare it
+                                if existing_size == content_length:
+                                    status_callback(f"          - SKIPPED (already exists with same size): {final_filename_to_save}")
+                                    continue
+                                # Sizes differ - will re-download
+                            else:
+                                # No Content-Length header - assume existing file is correct
+                                status_callback(f"          - SKIPPED (already exists): {final_filename_to_save}")
                                 continue
-                        except Exception: pass
+                        except Exception:
+                            # If any error checking, skip the file (assume it's good)
+                            status_callback(f"          - SKIPPED (already exists): {final_filename_to_save}")
+                            continue
 
-                    with open(final_filepath, 'wb') as f: shutil.copyfileobj(r.raw, f)
+                    # Download the file
+                    with open(final_filepath, 'wb') as f:
+                        for chunk in r.iter_content(chunk_size=8192):
+                            if chunk:  # filter out keep-alive new chunks
+                                f.write(chunk)
                     status_callback(f"          - SAVED: {final_filename_to_save}")
 
             except requests.exceptions.RequestException as e_req: status_callback(f"          - FAILED (Request Error): {original_name} - {e_req}")
@@ -881,11 +898,13 @@ class App(ctk.CTk):
                 course_page_wait = WebDriverWait(driver, 15) # Slightly shorter wait for main page elements
                 try:
                     course_page_wait.until(EC.presence_of_element_located((By.ID, "courseMenuPalette_contents")))
-                    self.update_status("    Course home page loaded. Identifying available sections...")
+                    self.update_status("    Course home page loaded.")
                 except TimeoutException:
                     self.update_status(f"    Timeout waiting for course menu on main page for course '{course_name_cleaned}'. Skipping this course's sections.")
                     continue # To next course if course home doesn't load its menu
 
+                # --- IDENTIFY AVAILABLE SECTIONS FIRST ---
+                self.update_status("    Identifying available sections...")
                 available_sections_to_scrape = []
                 for section_name_candidate in TARGET_COURSE_SECTIONS:
                     try:
@@ -905,7 +924,65 @@ class App(ctk.CTk):
                         self.update_status(f"    - Section '{section_name_candidate}' link not found quickly. Skipping this section.")
                     except NoSuchElementException: # Should be caught by TimeoutException with WebDriverWait
                         self.update_status(f"    - Section '{section_name_candidate}' link (NoSuchElement). Skipping this section.")
-                # --- OPTIMIZATION END ---
+
+                # --- SCRAPE COURSE HOMEPAGE ---
+                # Check if homepage has content_listContainer, and get actual URL after any redirects
+                homepage_has_content = False
+                homepage_actual_url = None
+                
+                try:
+                    # Try to find content_listContainer on homepage (short timeout)
+                    WebDriverWait(driver, 3).until(EC.presence_of_element_located((By.ID, "content_listContainer")))
+                    homepage_has_content = True
+                    # NOW get the URL after redirect
+                    homepage_actual_url = driver.current_url
+                    self.update_status(f"    Homepage has content (URL after redirect: {homepage_actual_url})")
+                except TimeoutException:
+                    self.update_status("    Homepage has no content_listContainer - will not scrape homepage.")
+                
+                # Only scrape homepage if it has content
+                if homepage_has_content:
+                    # Helper function to extract content_id from Blackboard URLs for comparison
+                    def get_content_id(url):
+                        """Extract content_id parameter from Blackboard URL"""
+                        if not url or 'content_id=' not in url:
+                            return None
+                        try:
+                            from urllib.parse import urlparse, parse_qs
+                            parsed = urlparse(url)
+                            query_params = parse_qs(parsed.query)
+                            content_ids = query_params.get('content_id', [])
+                            return content_ids[0] if content_ids else None
+                        except:
+                            return None
+                    
+                    # Determine folder name: if homepage content_id matches any section content_id, use that section's name
+                    homepage_folder_name = "Course Home"
+                    homepage_content_id = get_content_id(homepage_actual_url)
+                    
+                    for section in available_sections_to_scrape:
+                        section_content_id = get_content_id(section["url"])
+                        if homepage_content_id and section_content_id and homepage_content_id == section_content_id:
+                            homepage_folder_name = section["name"]
+                            self.update_status(f"    Course homepage is the same as '{section['name']}' section (content_id: {homepage_content_id}).")
+                            break
+                    
+                    self.update_status(f"    Scraping course homepage to '{homepage_folder_name}' folder...")
+                    content_map_for_homepage = []
+                    
+                    try:
+                        scrape_page_for_content(driver, content_map_for_homepage, self.update_status, current_relative_path=homepage_folder_name)
+                        
+                        if content_map_for_homepage:
+                            self.update_status(f"      Found {len(content_map_for_homepage)} items on course homepage. Processing downloads...")
+                            process_content_list(session, base_course_download_dir, content_map_for_homepage,
+                                               lambda p_val: self.after(0, self.update_progress, p_val),
+                                               self.update_status)
+                        else:
+                            self.update_status("      No downloadable items found on course homepage.")
+                    except Exception as e_homepage:
+                        self.update_status(f"      Error scraping course homepage: {e_homepage}")
+                # --- END HOMEPAGE SCRAPING ---
 
 
                 if not available_sections_to_scrape:
@@ -917,7 +994,24 @@ class App(ctk.CTk):
                     section_target_url = section_info["url"]
                     content_map_for_section = [] 
                     
+                    
+                    
+                    
                     self.update_status(f"  Processing available section: '{section_name_to_find}'")
+                    
+                    # Check if this section content_id matches the homepage content_id (skip if duplicate)
+                    if homepage_has_content and homepage_content_id:
+                        from urllib.parse import urlparse, parse_qs
+                        try:
+                            parsed = urlparse(section_target_url)
+                            query_params = parse_qs(parsed.query)
+                            section_content_ids = query_params.get('content_id', [])
+                            if section_content_ids and section_content_ids[0] == homepage_content_id:
+                                self.update_status(f"    SKIPPING '{section_name_to_find}' - already scraped as homepage")
+                                continue
+                        except:
+                            pass  # If URL parsing fails, don't skip
+                    
                     try:
                         self.update_status(f"    Navigating to section '{section_name_to_find}' via URL: {section_target_url}")
                         driver.get(section_target_url)
