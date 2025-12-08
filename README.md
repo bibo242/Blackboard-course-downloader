@@ -10,7 +10,7 @@
   <p align="center"><small><em>(Note: Windows might show a "Windows protected your PC" security warning. Click "More info" and then "Run anyway".)</em></small></p>
   <p align="center"><small><em>This happens because the app isn't yet code-signed (a process that verifies the publisher).</em></small></p>
   <p align="center">⭐ <small>If you find this project helpful, please consider starring it on GitHub! Your support is appreciated. ⭐</small></p>
-  <p align="center"><small>View all versions on the <a href="https://github.com/bibo242/Blackboard-course-downloader/releases/latest">Releases Page</a>.</small></p>
+  <p align="center"><small> (Latest version is available as .py file) View all versions on the <a href="https://github.com/bibo242/Blackboard-course-downloader/releases/latest">Releases Page</a>.</small></p>
 </div>
 
 ---
@@ -30,7 +30,9 @@ This tool is perfect for backing up course materials, whether you want to revise
 _Note: it will probably work for you if you're from another university that uses Blackboard but you have to change the URL in the code_
 
  
-![image](https://github.com/user-attachments/assets/8bd239d3-d8fd-4224-addf-e9aaf624bc3c)
+<img width="697" height="1024" alt="blackboard_downloader_ui" src="https://github.com/user-attachments/assets/ff227620-9703-4d13-a9a8-a455e2988e2d" />
+
+
 ![Screenshot from 2025-06-18 15-34-27](https://github.com/user-attachments/assets/a8b1a615-a89e-4943-8b7d-3f867cc6eafd)
 
 
