@@ -1,4 +1,5 @@
 # KFUPM Blackboard Course Downloader
+# Currently NOT working on the new Blackboard Ultra. Working on it.
 
 ---
 <h2 align="center">Downloads | التحميل</h2>
