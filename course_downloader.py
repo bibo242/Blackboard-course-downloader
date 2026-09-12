@@ -1,25 +1,48 @@
+"""
+KFUPM Blackboard Ultra Course Downloader
+========================================
+
+A desktop tool that logs into KFUPM Blackboard Ultra (SAML SSO) and downloads entire
+courses to your computer, preserving the original folder structure.
+
+This version targets **Blackboard Ultra** (the previous version targeted
+Blackboard Classic).  Login is done through the browser with Selenium so the
+KFUPM Single Sign-On (WSO2 / SAML) flow keeps working; all course data is then
+read through the public Blackboard Learn REST API, which is far faster and more
+reliable than scraping the rendered Ultra pages.
+
+Read-only: the tool never changes anything on Blackboard.
+"""
+
 import os
-import time
-import getpass
 import re
-import requests
+import sys
+import time
+import json
 import shutil
+import argparse
 import threading
+import traceback
+from html import escape as html_escape, unescape as html_unescape
+from urllib.parse import urlparse, unquote
+
+import requests
+
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import filedialog, messagebox
+
 import customtkinter as ctk
 
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
 
-
-
-# --- Selenium Imports (for multi-browser support) ---
+# --- Selenium imports (browser automation for the SSO login) ---
 from selenium import webdriver
 from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, NoSuchElementException, ElementClickInterceptedException
+from selenium.common.exceptions import (
+    ElementClickInterceptedException,
+    WebDriverException,
+)
 
 # Firefox specific
 from selenium.webdriver.firefox.service import Service as FirefoxService
@@ -31,1049 +54,1757 @@ from selenium.webdriver.chrome.options import Options as ChromeOptions
 from webdriver_manager.chrome import ChromeDriverManager
 
 
-# --- Constants and Mappings ---
-BASE_URL = "https://blackboard.kfupm.edu.sa/"
-MIME_TYPE_MAP = {
-    'application/pdf': '.pdf', 'application/vnd.ms-powerpoint': '.ppt',
-    'application/vnd.openxmlformats-officedocument.presentationml.presentation': '.pptx',
-    'application/msword': '.doc', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx',
-    'application/vnd.ms-excel': '.xls', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': '.xlsx',
-    'application/zip': '.zip', 'application/x-zip-compressed': '.zip', 'application/x-rar-compressed': '.rar',
-    'application/x-7z-compressed': '.7z', 'application/x-tar': '.tar', 'video/mp4': '.mp4',
-    'video/quicktime': '.mov', 'video/x-msvideo': '.avi', 'video/x-matroska': '.mkv', 'video/webm': '.webm',
-    'image/jpeg': '.jpg', 'image/png': '.png', 'image/gif': '.gif', 'text/plain': '.txt',
-    'application/x-ipynb+json': '.ipynb', 'application/octet-stream': ''
-}
-# Define the sections to scrape within each course
-TARGET_COURSE_SECTIONS = ["Course Content", "Course Syllabus", "Assignments", "Assessments / Tests"]
+# =========================================================================== #
+# Constants
+# =========================================================================== #
 
-# --- Backend Web Scraping Logic ---
+BASE_URL = "https://blackboard.kfupm.edu.sa/"
+ULTRA_HOME = BASE_URL + "ultra/"
+API_ROOT = "/learn/api/public/v1"
+
+CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".kfupm_bb_downloader")
+CONFIG_FILE = os.path.join(CONFIG_DIR, "config.ini")
+
+# Extensions used as a last resort when the server gives no filename hint.
+MIME_TYPE_MAP = {
+    "application/pdf": ".pdf",
+    "application/vnd.ms-powerpoint": ".ppt",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+    "application/msword": ".doc",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+    "application/vnd.ms-excel": ".xls",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+    "application/zip": ".zip",
+    "application/x-zip-compressed": ".zip",
+    "application/x-rar-compressed": ".rar",
+    "application/x-7z-compressed": ".7z",
+    "application/x-tar": ".tar",
+    "video/mp4": ".mp4",
+    "video/quicktime": ".mov",
+    "video/x-msvideo": ".avi",
+    "video/x-matroska": ".mkv",
+    "video/webm": ".webm",
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/gif": ".gif",
+    "text/plain": ".txt",
+    "application/x-ipynb+json": ".ipynb",
+    "application/octet-stream": "",
+}
+
+# Ultra content handler ids, grouped by what we do with them.
+FOLDER_HANDLERS = {
+    "resource/x-bb-folder",
+    "resource/x-bb-lesson",
+    "resource/x-bb-learning-module",
+    "resource/x-bb-module",
+    "resource/x-bb-blankpage",
+    "resource/x-bb-folder-file",
+}
+FILE_HANDLERS = {"resource/x-bb-file"}
+DOC_HANDLERS = {"resource/x-bb-document", "resource/x-bb-ultra-document"}
+LINK_HANDLERS = {"resource/x-bb-externallink", "resource/x-bb-courselink"}
+ASSESSMENT_HANDLERS = {
+    "resource/x-bb-asmt-test-link",
+    "resource/x-bb-asmt-assignment",
+    "resource/x-bb-asmt-survey-link",
+}
+
+
+# =========================================================================== #
+# Small helpers
+# =========================================================================== #
+
+_BAD_PATH_CHARS = re.compile(r'[\\/*?:"<>|\r\n\t]')
+_BBCSWEBDav_RE = re.compile(
+    r'(?:href|src)\s*=\s*["\']([^"\']*?/bbcswebdav/[^"\']+)["\']', re.IGNORECASE
+)
+
+
+def sanitize_component(name, fallback="untitled", max_len=180):
+    """Turn an arbitrary Blackboard title into a safe single path component."""
+    name = (name or "").strip()
+    name = _BAD_PATH_CHARS.sub("_", name)
+    name = re.sub(r"\s+", " ", name)
+    name = name.strip(" .")
+    if not name:
+        name = fallback
+    return name[:max_len]
+
+
+def extract_bbcswebdav_urls(body):
+    """Return unique /bbcswebdav/ URLs referenced by an Ultra body (BBML/HTML)."""
+    if not body:
+        return []
+    found = _BBCSWEBDav_RE.findall(body)
+    out = []
+    for url in found:
+        url = html_unescape(url).strip()
+        if url and url not in out:
+            out.append(url)
+    return out
+
+
+def kind_for_handler(handler, item=None):
+    """Classify a content item into folder/file/document/link/assessment/other."""
+    handler = (handler or "").strip().lower()
+    if handler in FOLDER_HANDLERS:
+        return "folder"
+    if handler in FILE_HANDLERS:
+        return "file"
+    if handler in DOC_HANDLERS or "syllabus" in handler:
+        return "document"
+    if handler in LINK_HANDLERS:
+        return "link"
+    if handler in ASSESSMENT_HANDLERS:
+        return "assessment"
+    if item is not None and item.get("hasChildren"):
+        return "folder"
+    if any(token in handler for token in ("folder", "lesson", "module", "blankpage")):
+        return "folder"
+    if "file" in handler:
+        return "file"
+    if "document" in handler:
+        return "document"
+    if "externallink" in handler or "courselink" in handler:
+        return "link"
+    if any(token in handler for token in ("asmt", "test", "assign", "survey")):
+        return "assessment"
+    return "other"
+
+
+def html_document(title, body):
+    """Wrap an Ultra body in a minimal, readable HTML shell."""
+    return (
+        "<!DOCTYPE html>\n"
+        '<html lang="en"><head><meta charset="utf-8">'
+        f"<title>{html_escape(title)}</title>\n"
+        "<style>body{font-family:system-ui,Segoe UI,Arial,sans-serif;"
+        "max-width:900px;margin:2rem auto;padding:0 1rem;line-height:1.55}"
+        "img{max-width:100%;height:auto}table{border-collapse:collapse}"
+        "td,th{border:1px solid #bbb;padding:4px 8px}</style></head><body>\n"
+        f"<h1>{html_escape(title)}</h1>\n{body}\n</body></html>\n"
+    )
+
+
+def write_url_file(path, url):
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write("[InternetShortcut]\nURL=" + url + "\n")
+
+
+def find_env_file():
+    """Locate a local .env next to the script (or in the working directory)."""
+    candidates = [
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"),
+        os.path.join(os.getcwd(), ".env"),
+    ]
+    if getattr(sys, "frozen", False):
+        # Running as a PyInstaller bundle: look next to the .exe as well.
+        candidates.insert(0, os.path.join(os.path.dirname(sys.executable), ".env"))
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def load_env_credentials():
+    """Read username/password from a local .env file, if one exists.
+
+    Accepts common key spellings (case-insensitive) and tolerates spaces around
+    the `=` sign, e.g. `User = 123456` / `Password = secret`.
+    """
+    path = find_env_file()
+    if not path:
+        return {}
+    values = {}
+    try:
+        with open(path, "r", encoding="utf-8-sig") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                key = key.strip().lower()
+                value = value.strip().strip('"').strip("'")
+                if key in ("user", "username", "bb_username", "kfupm_username"):
+                    values.setdefault("username", value)
+                elif key in ("password", "pass", "bb_password", "kfupm_password"):
+                    values.setdefault("password", value)
+    except OSError:
+        return {}
+    return values
+
+
+# =========================================================================== #
+# Selenium driver + SSO login
+# =========================================================================== #
 
 def setup_driver(browser_choice, status_callback, headless=True):
-    """
-    Sets up a Selenium WebDriver based on the user's explicit choice.
-    """
+    """Create a Selenium WebDriver for the requested browser."""
     if browser_choice == "firefox":
         status_callback("Initializing Firefox driver...")
         options = FirefoxOptions()
         if headless:
             options.add_argument("-headless")
+        geckodriver_path = os.environ.get("GECKODRIVER") or shutil.which("geckodriver")
+        if not geckodriver_path:
+            for candidate in (
+                os.path.expanduser("~/bin/geckodriver"),
+                os.path.expanduser("~/.local/bin/geckodriver"),
+                "/usr/local/bin/geckodriver",
+                "/tmp/opencode/geckodriver",
+            ):
+                if os.path.isfile(candidate):
+                    geckodriver_path = candidate
+                    break
         try:
-            # Attempt to use geckodriver from PATH first
-            try:
-                service = FirefoxService() # Assumes geckodriver is in PATH or managed
+            if geckodriver_path:
+                status_callback(f"  - using geckodriver at {geckodriver_path}")
+                service = FirefoxService(executable_path=geckodriver_path)
                 driver = webdriver.Firefox(service=service, options=options)
-            except Exception: 
-                status_callback("  - Geckodriver via Service failed, trying direct webdriver.Firefox(). Ensure geckodriver is in PATH.")
-                driver = webdriver.Firefox(options=options) # Fallback
+            else:
+                status_callback("  - geckodriver not found; relying on PATH")
+                driver = webdriver.Firefox(options=options)
+            driver.set_page_load_timeout(90)
             status_callback("Firefox driver initialized successfully.")
             return driver
-        except Exception as e:
-            raise RuntimeError(f"Failed to initialize Firefox. Is it installed and geckodriver in PATH? Error: {e}")
+        except Exception as exc:
+            raise RuntimeError(
+                "Failed to initialize Firefox. Is it installed and geckodriver on "
+                f"PATH? Error: {exc}"
+            )
 
-    elif browser_choice == "chrome":
+    if browser_choice == "chrome":
         status_callback("Initializing Chrome driver...")
         options = ChromeOptions()
         if headless:
             options.add_argument("--headless=new")
-        options.add_argument("--disable-gpu") 
-        options.add_argument("--no-sandbox") 
-        options.add_argument("--disable-dev-shm-usage") 
+        options.add_argument("--disable-gpu")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--window-size=1280,900")
         try:
             status_callback("  - Checking/installing chromedriver via webdriver_manager...")
             service = ChromeService(ChromeDriverManager().install())
             driver = webdriver.Chrome(service=service, options=options)
+            driver.set_page_load_timeout(90)
             status_callback("Chrome driver initialized successfully.")
             return driver
-        except Exception as e:
-            raise RuntimeError(f"Failed to initialize Chrome. Is it installed? webdriver_manager might have issues. Error: {e}")
-            
-    else:
-        raise ValueError("Invalid browser choice specified.")
-
-
-def login(driver, username, password):
-    driver.get(BASE_URL)
-    wait = WebDriverWait(driver, 20)
-    user_field = wait.until(EC.presence_of_element_located((By.ID, "user_id")))
-    pass_field = driver.find_element(By.ID, "password")
-    login_button = driver.find_element(By.ID, "entry-login")
-    user_field.send_keys(username)
-    pass_field.send_keys(password)
-    login_button.click()
-    wait.until(EC.presence_of_element_located((By.ID, "module:_4_1"))) # Courses module
-    return driver.get_cookies()
-
-
-# --- Reverted to user's original get_all_terms_and_courses logic ---
-# Minimal changes: added sanitization for term_name in the dict for consistency.
-def get_all_terms_and_courses(driver, status_callback):
-    status_callback("Scanning for all available terms and courses...")
-    all_courses = []
-    try:
-        wait = WebDriverWait(driver, 20)
-        # Using the XPath from your original code
-        term_headers = wait.until(EC.presence_of_all_elements_located((By.XPATH, "//h3[contains(@class, 'termHeading-coursefakeclass')]")))
-        
-        if not term_headers:
-            status_callback("No term headers found with class 'termHeading-coursefakeclass'. Page structure might have changed or no courses available.")
-            return []
-
-        for term_header in term_headers:
-            term_name_raw = term_header.text.strip()
-            if not term_name_raw: 
-                status_callback("Found a term header with no text, skipping.")
-                continue
-            
-            # Sanitize term name for use in paths later
-            term_name_clean = re.sub(r'[\\/*?:"<>|]', "_", term_name_raw)
-            status_callback(f"Found term: {term_name_clean} (Raw: {term_name_raw})")
-            
-            try:
-                # Using the XPath for course container from your original code
-                course_container = term_header.find_element(By.XPATH, "./following-sibling::div[1]")
-            except NoSuchElementException:
-                status_callback(f"  - Could not find course container (div sibling) for term: {term_name_clean}. Skipping this term's courses.")
-                continue # Skip to the next term_header if its course container div is not found
-
-            if not course_container.is_displayed():
-                try:
-                    # Using the click logic from your original code
-                    header_link = term_header.find_element(By.TAG_NAME, "a") # Assumes H3 has an A for expansion
-                    driver.execute_script("arguments[0].click();", header_link)
-                    wait.until(EC.visibility_of(course_container))
-                    status_callback(f"  - Expanded term: {term_name_clean}")
-                except Exception as e_click:
-                    status_callback(f"  - Could not expand term {term_name_clean}: {e_click}. Courses might be hidden.")
-                    # Continue processing, maybe courses are already visible or another issue
-
-            # Using the CSS selector for course elements from your original code
-            course_elements = course_container.find_elements(By.CSS_SELECTOR, "ul.courseListing li > a:not(.courseDataBlock a)")
-            
-            courses_in_term = []
-            for el in course_elements:
-                el_text = el.text.strip()
-                el_url = el.get_attribute('href')
-                if el_text and el_url:
-                    courses_in_term.append({
-                        "name": re.sub(r'[\\/*?:"<>|]', "_", el_text), # Sanitize course name
-                        "url": el_url, 
-                        "term": term_name_clean # Use cleaned term name
-                    })
-            
-            if courses_in_term:
-                all_courses.extend(courses_in_term)
-                status_callback(f"  - Found {len(courses_in_term)} courses in term '{term_name_clean}'.")
-            else:
-                status_callback(f"  - No course links found within the container for term '{term_name_clean}'.")
-            
-    except TimeoutException:
-        status_callback("Timed out waiting for term headers. The page might not have loaded correctly or no terms are visible.")
-    except Exception as e:
-        status_callback(f"An error occurred while scanning for terms and courses: {e}")
-        import traceback
-        status_callback(traceback.format_exc())
-    
-    if not all_courses:
-        status_callback("Scan finished. No courses were found across any terms based on the expected structure.")
-    return all_courses
-
-
-def scrape_page_for_content(driver, content_map, status_callback, current_relative_path=""):
-    wait = WebDriverWait(driver, 10)
-    try:
-        content_list_container = wait.until(EC.presence_of_element_located((By.ID, "content_listContainer")))
-        # Find all top-level list items on the current page
-        content_list_items = content_list_container.find_elements(By.CSS_SELECTOR, "li.liItem[id^='contentListItem:']")
-    except TimeoutException:
-        status_callback(f"  - No 'content_listContainer' or 'liItem' found on current page ({driver.current_url}). Might be empty or structured differently in '{current_relative_path}'.")
-        return
-
-    folders_to_visit_recursively = [] # Stores info about BB Folders to scan after processing current page items
-
-    for item_idx, li_element in enumerate(content_list_items):
-        item_title_str = f"Untitled Item {item_idx+1}"
-        try:
-            # Prefer title from H3 inside div.item or div.itemHead
-            title_h3_element = li_element.find_element(By.CSS_SELECTOR, "div.item > h3, div.item > div.itemHead > h3")
-            item_title_str = title_h3_element.text.strip()
-        except NoSuchElementException:
-            try: # Fallback: try any link text within the item if h3 not found or empty
-                any_link_in_item = li_element.find_element(By.CSS_SELECTOR, "a")
-                if any_link_in_item.text.strip():
-                    item_title_str = any_link_in_item.text.strip()
-            except NoSuchElementException:
-                status_callback(f"    - Could not determine title for an item in '{current_relative_path}'. Using default name.")
-
-        # Sanitize title for use as a folder or file name component
-        clean_item_title_as_path_segment = re.sub(r'[\\/*?:"<>|]', "_", item_title_str) if item_title_str else f"untitled_item_{item_idx}"
-
-        # --- Stage 1: Check if the li_element represents a Blackboard Folder ---
-        # These folders navigate to another listContent.jsp page.
-        try:
-            # Look for a folder link specifically within the item's main title area (e.g., inside H3's <a>)
-            folder_link_tag = li_element.find_element(By.XPATH, ".//div[contains(@class,'item')]//h3//a[contains(@href, '/listContent.jsp?')]")
-            folder_url_value = folder_link_tag.get_attribute("href")
-            if folder_url_value:
-                folders_to_visit_recursively.append({
-                    "name": clean_item_title_as_path_segment, # This will be the subfolder name for recursion
-                    "url": folder_url_value
-                })
-                status_callback(f"    Identified BB Folder: '{item_title_str}'. Will be scanned recursively into subfolder '{clean_item_title_as_path_segment}'.")
-                continue # This li_element is a folder; move to the next li_element in content_list_items
-        except NoSuchElementException:
-            # This li_element is not a standard Blackboard Folder based on its main H3 link.
-            pass
-
-        # --- Stage 2: Check if the li_element has an "Attached Files" section ---
-        # (e.g., an Assignment item with multiple attached PDFs like your "Assignment 3" example)
-        # These attachments should go into a subfolder named after the li_element's title.
-        attachments_were_processed_for_this_item = False
-        try:
-            # Standard Blackboard structure for attachments (based on your HTML example)
-            attachments_ul_container = li_element.find_element(By.XPATH, ".//div[contains(@class, 'details')]//ul[contains(@class, 'attachments')]")
-            attachment_links_in_ul = attachments_ul_container.find_elements(By.XPATH, ".//a[@href]")
-
-            if attachment_links_in_ul:
-                attachments_were_processed_for_this_item = True
-                # Create a subfolder path using the item's title for its attachments
-                path_for_these_item_attachments = os.path.join(current_relative_path, clean_item_title_as_path_segment)
-                status_callback(f"    Item '{item_title_str}' has an 'Attachments' section. Files will be saved in subfolder: '{path_for_these_item_attachments}'")
-
-                for attachment_link_tag in attachment_links_in_ul:
-                    attachment_url = attachment_link_tag.get_attribute("href")
-                    if not attachment_url or "javascript:void(0)" in attachment_url or attachment_url.strip() == "#":
-                        continue
-
-                    # Use the attachment's own link text as its name
-                    attachment_name_raw = attachment_link_tag.text.strip()
-                    # Sanitize attachment filename (though process_content_list does more thorough cleaning later)
-                    attachment_filename_candidate = attachment_name_raw if attachment_name_raw else os.path.basename(attachment_url.split('?')[0])
-                    clean_attachment_filename = re.sub(r'[\\/*?:"<>|]', "_", attachment_filename_candidate)
-
-                    if "/bbcswebdav/" in attachment_url:
-                        content_map.append({
-                            "type": "File", "url": attachment_url,
-                            "name": clean_attachment_filename, "path": path_for_these_item_attachments
-                        })
-                        status_callback(f"      Found Attached File: '{clean_attachment_filename}' for item '{item_title_str}'.")
-                    elif attachment_url.startswith("http") and BASE_URL.split('/')[2] not in attachment_url: # External web link
-                        content_map.append({
-                            "type": "WebLink", "url": attachment_url,
-                            "name": clean_attachment_filename, "path": path_for_these_item_attachments
-                        })
-                        status_callback(f"      Found Attached WebLink: '{clean_attachment_filename}' for item '{item_title_str}'.")
-
-                # If an item has an "Attachments" section, assume its main link (e.g., to uploadAssignment page) is not a downloadable file itself.
-                continue # Move to the next li_element in content_list_items
-        except NoSuchElementException:
-            # No "div.details ul.attachments" structure found, or no links within it.
-            pass # Proceed to check for general/direct links if this item wasn't an attachment container
-
-        # --- Stage 3: If not a BB Folder and no "Attached Files" section processed, handle as a general content item ---
-        # (e.g., a direct link to a single PDF, a Web Link item, embedded media not in an attachments section)
-        # These items are placed directly in the current_relative_path (i.e., not in a new subfolder named after themselves).
-        try:
-            # Find all relevant links/media sources directly under the li_element's scope.
-            # Exclude javascript links, empty hrefs, and already identified folder links.
-            general_content_elements = li_element.find_elements(By.XPATH,
-                ".//a[@href[ (contains(.,'/bbcswebdav/')) or " +
-                "(starts-with(.,'http') and not(starts-with(.,'javascript:')) and .!='#') ] and not(contains(@href, '/listContent.jsp?')) ] | " +
-                ".//video[@src[starts-with(.,'http') or contains(.,'/bbcswebdav/')]] | " +
-                ".//img[@src[starts-with(.,'http') or contains(.,'/bbcswebdav/')]]"
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to initialize Chrome. Is it installed? Error: {exc}"
             )
 
-            if not general_content_elements and not attachments_were_processed_for_this_item: # and not a folder (already continued)
-                 status_callback(f"    - Item '{item_title_str}' is not a folder, has no 'Attachments' section, and no direct file/web/media links found by general XPath. Skipping this item's direct content.")
-
-            for content_element_tag in general_content_elements:
-                url_value = content_element_tag.get_attribute("href") or content_element_tag.get_attribute("src")
-                if not url_value: continue
-
-                name_candidate = clean_item_title_as_path_segment # Default to item's title
-                if content_element_tag.tag_name == 'a':
-                    link_text_raw = content_element_tag.text.strip()
-                    # Use specific link text if it's not generic and better than the item title
-                    if link_text_raw and link_text_raw.lower() not in ["view", "open", "download", "link", "attachment", item_title_str.lower()]:
-                        name_candidate = re.sub(r'[\\/*?:"<>|]', "_", link_text_raw) # Clean link text
-                
-                # If multiple general links under one li_element default to item title, try to use basename for uniqueness
-                if general_content_elements.index(content_element_tag) > 0 and name_candidate == clean_item_title_as_path_segment:
-                     basename_from_url = os.path.basename(url_value.split('?')[0])
-                     if basename_from_url : name_candidate = re.sub(r'[\\/*?:"<>|]', "_", basename_from_url)
+    raise ValueError("Invalid browser choice specified.")
 
 
-                if "/bbcswebdav/" in url_value or content_element_tag.tag_name in ['video', 'img']:
-                    content_map.append({
-                        "type": "File", "url": url_value,
-                        "name": name_candidate, "path": current_relative_path # Saved directly in current_relative_path
-                    })
-                    status_callback(f"      Found General File/Media: '{name_candidate}' (from item '{item_title_str}') in '{current_relative_path or 'section root'}'")
-                elif url_value.startswith("http"): # External web link
-                    content_map.append({
-                        "type": "WebLink", "url": url_value,
-                        "name": name_candidate, "path": current_relative_path # Saved directly in current_relative_path
-                    })
-                    status_callback(f"      Found General WebLink: '{name_candidate}' (from item '{item_title_str}') in '{current_relative_path or 'section root'}'")
-        except NoSuchElementException:
-            pass # No general content elements found for this item.
-        # End of processing one li_element from content_list_items
-    
-    # --- After iterating all li_elements on the current page, recursively visit collected BB Folders ---
-    for folder_to_scan_info in folders_to_visit_recursively:
-        folder_name_as_path_segment = folder_to_scan_info['name'] # This is the cleaned title of the folder item
-        folder_target_url = folder_to_scan_info['url']
-        
-        # The new relative path for content inside this folder will be current_relative_path joined with folder_name_as_path_segment
-        new_recursive_path_for_folder_content = os.path.join(current_relative_path, folder_name_as_path_segment)
-        
-        status_callback(f"    > Navigating into Sub-Folder: '{folder_name_as_path_segment}' (URL: {folder_target_url})")
-        status_callback(f"      Content from this folder will be saved under relative path: '{new_recursive_path_for_folder_content}'")
-        
+def _find_visible(driver, selectors):
+    """Return the first displayed+enabled element matching any (By, value)."""
+    for by, value in selectors:
         try:
-            driver.get(folder_target_url)
-            # Recursive call to scrape the content of this sub-folder
-            scrape_page_for_content(driver, content_map, status_callback, new_recursive_path_for_folder_content)
-            
-            status_callback(f"    < Navigating back from sub-folder: '{folder_name_as_path_segment}'")
-            driver.back() # Go back to the page that listed this folder
-            # Wait for the parent page's content list to be present again before proceeding with other folders on this level
-            WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.ID, "content_listContainer")))
-            time.sleep(0.5) # Small pause for stability and to ensure page state is updated
-        except Exception as e_folder_navigation:
-            status_callback(f"      ! ERROR during navigation or scraping of folder '{folder_name_as_path_segment}': {e_folder_navigation}")
-            status_callback(f"      ! Current URL: {driver.current_url}. Attempting to recover by navigating back if possible.")
+            for element in driver.find_elements(by, value):
+                try:
+                    if element.is_displayed() and element.is_enabled():
+                        return element
+                except WebDriverException:
+                    continue
+        except WebDriverException:
+            continue
+    return None
+
+
+def _click_element(driver, element):
+    try:
+        element.click()
+    except (ElementClickInterceptedException, WebDriverException):
+        driver.execute_script("arguments[0].click();", element)
+
+
+def _click_submit(driver):
+    selectors = [
+        (By.ID, "submitButton"),          # KFUPM ADFS (a <span>, not a button)
+        (By.ID, "login-button"),
+        (By.CSS_SELECTOR, 'span[role="button"]'),
+        (By.CSS_SELECTOR, 'button[type="submit"]'),
+        (By.CSS_SELECTOR, 'input[type="submit"]'),
+        (By.CSS_SELECTOR, "button.btn-primary"),
+        (
+            By.XPATH,
+            "//*[@role='button' and (contains(., 'Sign in') or contains(., 'Sign In'))]",
+        ),
+        (
+            By.XPATH,
+            "//button[contains(translate(., 'LOGIN', 'login'), 'login') "
+            "or contains(translate(., 'SIGN IN', 'sign in'), 'sign in') "
+            "or contains(translate(., 'CONTINUE', 'continue'), 'continue') "
+            "or contains(translate(., 'APPROVE', 'approve'), 'approve') "
+            "or contains(translate(., 'ACCEPT', 'accept'), 'accept')]",
+        ),
+        (By.XPATH, "//input[@type='submit']"),
+    ]
+    element = _find_visible(driver, selectors)
+    if element is not None:
+        _click_element(driver, element)
+        return True
+    return False
+
+
+def _looks_logged_in(driver):
+    """True once the browser is back on the Blackboard Ultra site."""
+    try:
+        url = driver.current_url or ""
+    except WebDriverException:
+        return False
+    if "blackboard.kfupm.edu.sa" not in url:
+        return False
+    if "login.kfupm.edu.sa" in url:
+        return False
+    if not ("/ultra" in url or "/webapps" in url or "/learn" in url):
+        return False
+    # Still showing a credential form? Then we are not logged in.
+    try:
+        if driver.find_elements(By.CSS_SELECTOR, 'input[type="password"]'):
+            return False
+    except WebDriverException:
+        pass
+    return True
+
+
+def login(driver, username, password, status_callback, timeout=240):
+    """Log into KFUPM Blackboard through the WSO2 SAML SSO flow.
+
+    Returns the list of browser cookies for the Blackboard domain.
+    """
+    status_callback("Opening Blackboard Ultra and starting SSO login...")
+    driver.get(ULTRA_HOME)
+
+    username_selectors = [
+        (By.ID, "userNameInput"),          # KFUPM ADFS
+        (By.NAME, "UserName"),
+        (By.ID, "username"),
+        (By.NAME, "username"),
+        (By.CSS_SELECTOR, 'input[name="username"]'),
+        (By.ID, "userName"),
+        (By.NAME, "userName"),
+        (By.CSS_SELECTOR, 'input[name="userName"]'),
+        (By.CSS_SELECTOR, 'input[name*="user" i]'),
+        (By.CSS_SELECTOR, 'input[id*="user" i]'),
+        (By.CSS_SELECTOR, 'input[type="email"]'),
+        (By.CSS_SELECTOR, 'input[type="text"]'),
+    ]
+    password_selectors = [
+        (By.ID, "passwordInput"),          # KFUPM ADFS
+        (By.NAME, "Password"),
+        (By.ID, "password"),
+        (By.NAME, "password"),
+        (By.CSS_SELECTOR, 'input[type="password"]'),
+        (By.CSS_SELECTOR, 'input[name*="pass" i]'),
+        (By.CSS_SELECTOR, 'input[id*="pass" i]'),
+    ]
+
+    deadline = time.time() + timeout
+    last_url = ""
+    username_entered = False
+    clicked_continue = False
+    password_attempts = 0
+
+    while time.time() < deadline:
+        if _looks_logged_in(driver):
+            status_callback("Login successful. Landed on Blackboard Ultra.")
+            return driver.get_cookies()
+
+        try:
+            current_url = driver.current_url
+        except WebDriverException:
+            current_url = ""
+        if current_url != last_url:
+            status_callback(f"  - at: {current_url}")
+            last_url = current_url
+
+        user_field = _find_visible(driver, username_selectors)
+        pass_field = _find_visible(driver, password_selectors)
+
+        if user_field is not None and not username_entered:
             try:
-                # If the error occurred before driver.back(), or if driver.back() itself failed,
-                # and we are still on the folder's page, try to go back.
-                if driver.current_url == folder_target_url or driver.current_url.startswith(folder_target_url.split('?')[0]):
-                    driver.back()
-                    WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, "content_listContainer")))
-                status_callback(f"      ! Recovery: Navigated back to {driver.current_url}")
-            except Exception as e_recovery:
-                status_callback(f"      ! Recovery attempt (driver.back) also failed for folder '{folder_name_as_path_segment}': {e_recovery}. May miss subsequent items on this level.")
-            # Continue with the next folder on the current level if any.
+                if not (user_field.get_attribute("value") or ""):
+                    user_field.clear()
+                    user_field.send_keys(username)
+                username_entered = True
+                status_callback("  - entered username")
+            except WebDriverException:
+                pass
+
+        if pass_field is not None:
+            if password_attempts >= 3:
+                raise RuntimeError(
+                    "Login was rejected three times. Please double-check your "
+                    "username and password, then try again."
+                )
+            try:
+                pass_field.clear()
+                pass_field.send_keys(password)
+                status_callback("  - entered password")
+                _click_submit(driver)
+                password_attempts += 1
+                username_entered = False
+                clicked_continue = False
+                time.sleep(2)
+                continue
+            except WebDriverException as exc:
+                status_callback(f"  - could not submit login form: {exc}")
+        elif username_entered:
+            # Two-step login: username first, then a "Next" button.
+            if _click_submit(driver):
+                status_callback("  - submitted username")
+                time.sleep(1)
+        elif not clicked_continue and "login.kfupm.edu.sa" in current_url:
+            # Consent / "continue" style page with no fields.
+            if _click_submit(driver):
+                status_callback("  - clicked continue")
+                clicked_continue = True
+                time.sleep(1)
+
+        time.sleep(0.5)
+
+    raise RuntimeError(
+        "Timed out waiting for the Blackboard Ultra login to complete. "
+        "Please check your username/password and network connection."
+    )
 
 
-def process_content_list(session, base_course_dir, content_list, progress_callback, status_callback):
-    if not content_list:
-        status_callback("      - No new downloadable files or links found in this section/folder.")
-        return
-        
-    unique_content_by_url = {}
-    for item in content_list:
-        if item['url'] not in unique_content_by_url:
-            unique_content_by_url[item['url']] = item
-    unique_content = list(unique_content_by_url.values())
+# =========================================================================== #
+# Ultra REST client
+# =========================================================================== #
 
-    status_callback(f"\n      [Processing {len(unique_content)} unique items for download/linking from this section/folder]")
-    
-    for i, item_info in enumerate(unique_content):
-        if progress_callback: 
-            progress_callback((i + 1) / len(unique_content) * 100)
-        
-        item_type = item_info.get('type', 'Unknown')
-        original_name = item_info.get('name', 'untitled')
-        relative_path_within_section = item_info.get('path', '') 
-        url = item_info.get('url')
+class UltraError(Exception):
+    pass
 
+
+class UltraAuthError(UltraError):
+    pass
+
+
+class UltraClient:
+    """Thin wrapper around the Blackboard Learn REST API (session based)."""
+
+    def __init__(self, base_url=BASE_URL, cookies=None, status_callback=None,
+                 timeout=60, overwrite=False, driver=None):
+        self.base = base_url.rstrip("/")
+        self.status = status_callback or (lambda *_: None)
+        self.timeout = timeout
+        self.overwrite = overwrite
+        self.driver = driver
+        self.session = requests.Session()
+        self.session.headers.update(
+            {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36 "
+                    "KFUPM-BB-Ultra-Downloader/2.0"
+                ),
+                "Accept": "application/json",
+            }
+        )
+        for cookie in cookies or []:
+            try:
+                self.session.cookies.set(
+                    cookie["name"],
+                    cookie["value"],
+                    domain=cookie.get("domain"),
+                    path=cookie.get("path") or "/",
+                )
+            except (KeyError, TypeError):
+                continue
+
+    # ------------------------------------------------------------- requests
+    def _url(self, path):
+        if path.startswith("http://") or path.startswith("https://"):
+            return path
+        if not path.startswith("/"):
+            path = "/" + path
+        return self.base + path
+
+    def _browser_get_json(self, url, params=None):
+        """Fallback: run the GET inside the logged-in browser via fetch().
+
+        Used only if a plain cookie-authenticated request is rejected, so the
+        tool keeps working on tenants that are strict about API sessions.
+        """
+        if self.driver is None:
+            return None
+        if params:
+            url = requests.Request("GET", url, params=params).prepare().url
+        script = (
+            "const url = arguments[0];"
+            "const cb = arguments[arguments.length - 1];"
+            "fetch(url, {credentials: 'include', "
+            "headers: {'Accept': 'application/json'}})"
+            ".then(r => r.text().then(t => cb({status: r.status, body: t})))"
+            ".catch(e => cb({status: 0, body: String(e)}));"
+        )
+        try:
+            result = self.driver.execute_async_script(script, url)
+        except WebDriverException as exc:
+            self.status(f"  - browser fallback failed: {exc}")
+            return None
+        if not result or result.get("status") != 200:
+            return None
+        try:
+            return json.loads(result.get("body") or "null")
+        except ValueError:
+            return None
+
+    def get(self, path, params=None, retries=3, allow_404=False):
+        url = self._url(path)
+        delay = 1.5
+        last_error = None
+        for attempt in range(1, retries + 1):
+            try:
+                response = self.session.get(
+                    url, params=params, timeout=self.timeout,
+                    headers={"Accept": "application/json"},
+                )
+            except requests.RequestException as exc:
+                last_error = exc
+                if attempt >= retries:
+                    break
+                time.sleep(delay)
+                delay *= 2
+                continue
+
+            if response.status_code == 200:
+                try:
+                    return response.json()
+                except ValueError as exc:
+                    raise UltraError(f"GET {url} did not return JSON: {exc}")
+            if response.status_code == 404 and allow_404:
+                return None
+            if response.status_code in (401, 403):
+                fallback = self._browser_get_json(url, params)
+                if fallback is not None:
+                    return fallback
+                # 403 can be transient (rate limiting / session warm-up): retry.
+                if response.status_code == 403 and attempt < retries:
+                    last_error = UltraError("HTTP 403")
+                    time.sleep(delay)
+                    delay *= 2
+                    continue
+                raise UltraAuthError(
+                    f"Blackboard rejected the request (HTTP {response.status_code}). "
+                    "Your session may have expired; try scanning again."
+                )
+            if response.status_code == 429 or response.status_code >= 500:
+                last_error = UltraError(f"HTTP {response.status_code}")
+                if attempt >= retries:
+                    break
+                time.sleep(delay)
+                delay *= 2
+                continue
+            raise UltraError(f"GET {url} failed with HTTP {response.status_code}")
+
+        raise UltraError(f"GET {url} failed: {last_error}")
+
+    def wait_until_authenticated(self, timeout=60):
+        """Poll /users/me until the SSO session is fully usable.
+
+        Right after landing on /ultra the session cookies can take a moment to
+        propagate, which briefly yields 401/403. Retrying avoids that race.
+        """
+        deadline = time.time() + timeout
+        last_error = None
+        while time.time() < deadline:
+            try:
+                me = self.get(f"{API_ROOT}/users/me")
+                if me:
+                    return me
+            except UltraAuthError as exc:
+                last_error = exc
+                time.sleep(2)
+        if last_error:
+            raise last_error
+        raise UltraAuthError("Blackboard session did not become ready in time.")
+
+    def get_all(self, path, params=None, max_pages=300):
+        """Follow Blackboard paging until every result has been collected."""
+        collected = []
+        next_ref = path
+        next_params = params if params is not None else {"limit": 200}
+        visited = set()
+        while next_ref and next_ref not in visited and len(visited) < max_pages:
+            visited.add(next_ref)
+            payload = self.get(next_ref, params=next_params)
+            if not payload:
+                break
+            collected.extend(payload.get("results") or [])
+            next_ref = (payload.get("paging") or {}).get("nextPage")
+            next_params = None
+        return collected
+
+    # ------------------------------------------------------------ downloads
+    def download(self, url, dest, expected_size=None):
+        """Stream a URL to `dest`. Returns (status, size, info).
+
+        status is one of: 'saved', 'skipped', 'failed'.
+        """
         if not url:
-            status_callback(f"      ({i+1}) Skipping item with no URL: {original_name}")
+            return "failed", 0, "no url"
+        os.makedirs(os.path.dirname(os.path.abspath(dest)), exist_ok=True)
+
+        if os.path.exists(dest) and not self.overwrite:
+            existing = os.path.getsize(dest)
+            if expected_size is None or existing == expected_size:
+                return "skipped", existing, "already exists"
+
+        tmp = dest + ".part"
+        try:
+            with self.session.get(
+                url, stream=True, timeout=300, allow_redirects=True
+            ) as response:
+                if response.status_code in (401, 403):
+                    return "failed", 0, f"HTTP {response.status_code} (no access)"
+                if response.status_code == 404:
+                    return "failed", 0, "HTTP 404 (not found)"
+                if response.status_code >= 400:
+                    return "failed", 0, f"HTTP {response.status_code}"
+
+                total = 0
+                with open(tmp, "wb") as handle:
+                    for chunk in response.iter_content(chunk_size=131072):
+                        if chunk:
+                            handle.write(chunk)
+                            total += len(chunk)
+
+            if total == 0:
+                _quiet_remove(tmp)
+                return "failed", 0, "empty response body"
+            os.replace(tmp, dest)
+            return "saved", total, "ok"
+        except requests.RequestException as exc:
+            _quiet_remove(tmp)
+            return "failed", 0, str(exc)
+        except OSError as exc:
+            _quiet_remove(tmp)
+            return "failed", 0, f"write error: {exc}"
+
+
+def _quiet_remove(path):
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except OSError:
+        pass
+
+
+# =========================================================================== #
+# Course / term discovery
+# =========================================================================== #
+
+def list_terms_and_courses(client, status_callback):
+    """Return every accessible Ultra course, grouped later by term."""
+    status_callback("Scanning for all available terms and courses...")
+    client.wait_until_authenticated()
+
+    # The internal Ultra endpoint reflects exactly what the web UI shows and
+    # excludes cross-listed sections the student cannot actually open.
+    memberships = None
+    try:
+        memberships = client.get_all("/learn/api/v1/users/me/memberships")
+    except UltraError:
+        memberships = None
+    if not memberships:
+        memberships = client.get_all(f"{API_ROOT}/users/me/courses")
+    status_callback(f"  - found {len(memberships)} course membership(s)")
+
+    courses = []
+    seen_ids = set()
+    term_cache = {}
+    skipped = 0
+
+    for membership in memberships:
+        course_id = membership.get("courseId")
+        if not course_id or course_id in seen_ids:
+            continue
+        seen_ids.add(course_id)
+
+        # Prefer the richer internal course detail; fall back to the public one.
+        details = None
+        for path in (
+            f"/learn/api/v1/courses/{course_id}",
+            f"{API_ROOT}/courses/{course_id}",
+        ):
+            try:
+                details = client.get(path, allow_404=True)
+            except UltraError:
+                details = None
+            if details:
+                break
+        if not details or details.get("isOrganization") or details.get("organization"):
+            skipped += 1
             continue
 
-        final_folder_path = os.path.join(base_course_dir, relative_path_within_section)
-        os.makedirs(final_folder_path, exist_ok=True)
-        
-        # --- MODIFICATION FOR FILENAME AND EXTENSION ---
-        base_name_candidate = original_name
-        ext_candidate = ""
+        name = (
+            details.get("name")
+            or details.get("displayName")
+            or details.get("courseId")
+            or course_id
+        )
+        code = details.get("courseId") or ""
 
-        # If it's a file, try to split extension more traditionally
-        if item_type == "File":
-            potential_base, potential_ext = os.path.splitext(original_name)
-            # Check if the potential_ext is a known or common-looking extension
-            if potential_ext and len(potential_ext) > 1 and len(potential_ext) <= 5 and potential_ext[1:].isalnum():
-                base_name_candidate = potential_base
-                ext_candidate = potential_ext
-            # else, keep original_name as base_name_candidate, ext_candidate remains ""
-        # For WebLinks, or files where splitext gave an unusual "extension", 
-        # treat the whole original_name as the base for cleaning.
-        # The .url extension will be added specifically for WebLinks later.
+        term_id = details.get("termId")
+        term_name = "Unknown Term"
+        term_obj = details.get("term")
+        if isinstance(term_obj, dict):
+            term_name = (
+                term_obj.get("name")
+                or term_obj.get("description")
+                or term_obj.get("id")
+                or term_name
+            )
+        elif isinstance(term_obj, str) and term_obj:
+            term_id = term_id or term_obj
+        if term_name == "Unknown Term" and term_id:
+            if term_id not in term_cache:
+                term = None
+                for path in (
+                    f"{API_ROOT}/terms/{term_id}",
+                    f"/learn/api/v1/terms/{term_id}",
+                ):
+                    try:
+                        term = client.get(path, allow_404=True)
+                    except UltraError:
+                        term = None
+                    if term:
+                        break
+                term_cache[term_id] = (term or {}).get("name") or "Unknown Term"
+            term_name = term_cache[term_id]
 
-        # Clean the base name candidate (this will be used for both File base and WebLink base)
-        # Allow dots within the name initially, they will be handled during final filename construction.
-        clean_base_name = re.sub(r'[^\w\s\-\.]', '_', base_name_candidate).strip()
-        clean_base_name = re.sub(r'\s+', ' ', clean_base_name) # Consolidate multiple spaces
-        if not clean_base_name: 
-            clean_base_name = "untitled_item" 
-        # --- END OF MODIFICATION ---
+        courses.append(
+            {
+                "name": name,
+                "code": code,
+                "id": course_id,
+                "term": term_name,
+                "url": course_id,  # kept for compatibility with the UI
+            }
+        )
+
+    if skipped:
+        status_callback(f"  - skipped {skipped} organization/inaccessible course(s)")
+    status_callback(f"  - {len(courses)} course(s) discovered")
+    return courses
 
 
-        if item_type == "File":
-            status_callback(f"        ({i+1}/{len(unique_content)}) Downloading File: {os.path.join(relative_path_within_section, original_name)}")
+# =========================================================================== #
+# Course downloader (content tree walk + materialisation)
+# =========================================================================== #
+
+class CourseDownloader:
+    def __init__(self, client, driver, status_callback, options=None):
+        self.client = client
+        self.driver = driver
+        self.status = status_callback
+        self.options = {
+            "documents": True,
+            "links": True,
+            "announcements": True,
+            "syllabus": True,
+        }
+        if options:
+            self.options.update(options)
+        self._used_names = {}
+        self._lock = threading.Lock()
+        self._syllabus_seen = False
+        self._root_failed = False
+        self.failed_courses = []
+        self.stats = {
+            "files": 0,
+            "skipped": 0,
+            "failed": 0,
+            "links": 0,
+            "documents": 0,
+            "announcements": 0,
+        }
+
+    # ------------------------------------------------------------- helpers
+    def _alloc(self, directory, name):
+        key = os.path.normcase(os.path.abspath(directory))
+        with self._lock:
+            used = self._used_names.setdefault(key, set())
+            candidate = name
+            base, ext = os.path.splitext(name)
+            index = 1
+            while candidate.lower() in used:
+                candidate = f"{base} ({index}){ext}"
+                index += 1
+            used.add(candidate.lower())
+            return candidate
+
+    def _write_url(self, directory, title, url):
+        filename = self._alloc(
+            directory, sanitize_component(title, fallback="link") + ".url"
+        )
+        path = os.path.join(directory, filename)
+        try:
+            write_url_file(path, url)
+            self.stats["links"] += 1
+            self.status(f"        LINK: {filename}")
+        except OSError as exc:
+            self.status(f"        FAILED link {filename}: {exc}")
+
+    # --------------------------------------------------------------- public
+    def run(self, course, base_dir):
+        self._syllabus_seen = False
+        self._root_failed = False
+        course_dir = os.path.join(
+            base_dir,
+            sanitize_component(course.get("term", "Unknown Term")),
+            sanitize_component(course.get("name", course.get("id", "course"))),
+        )
+        os.makedirs(course_dir, exist_ok=True)
+        self.status(f"    Output folder: {course_dir}")
+
+        self._walk(course["id"], None, course_dir, depth=0)
+
+        if self._root_failed:
+            self.failed_courses.append(
+                f"{course.get('name')} [{course.get('term')}]"
+            )
+
+        if self.options.get("announcements", True):
             try:
-                with session.get(url, stream=True, timeout=300, allow_redirects=True) as r: 
-                    r.raise_for_status() 
-                    server_fname_raw = ""
-                    if "content-disposition" in r.headers:
-                        fname_match = re.findall(r'filename\*?=(?:UTF-\d{1,2}\'\')?([^";\n]+)', r.headers['content-disposition'], re.IGNORECASE)
-                        if fname_match: server_fname_raw = requests.utils.unquote(fname_match[0].strip('"\' '))
-                    if not server_fname_raw: server_fname_raw = os.path.basename(url.split('?')[0])
+                self._download_announcements(course["id"], course_dir)
+            except UltraError as exc:
+                self.status(f"    ! Announcements failed: {exc}")
 
-                    # Get extension from server filename if possible, or from original 'ext_candidate'
-                    _, ext_from_server = os.path.splitext(server_fname_raw)
-                    
-                    # Prioritize: 1. ext_candidate (if item_type was File and splitext was good)
-                    #             2. ext_from_server
-                    #             3. MIME type map
-                    final_ext = ext_candidate or ext_from_server or MIME_TYPE_MAP.get(r.headers.get('content-type', '').split(';')[0].lower(), "")
-                    
-                    if final_ext and not final_ext.startswith('.'): 
-                        final_ext = '.' + final_ext
-                    
-                    # Now, clean_base_name should not have the extension part if final_ext is determined
-                    # If clean_base_name ends with what we think is the final_ext, remove it to avoid duplication.
-                    temp_clean_base = clean_base_name
-                    if final_ext and temp_clean_base.lower().endswith(final_ext.lower()):
-                        temp_clean_base = temp_clean_base[:-len(final_ext)]
-                    
-                    # Final sanitization for filesystem (remove any remaining problematic chars from base)
-                    # and ensure no dots are left in this base part that could be misinterpreted as extension sep.
-                    final_base_for_file = re.sub(r'[\\/*?:"<>|.]', "_", temp_clean_base) # Replace dots in base with underscore
-                    final_base_for_file = re.sub(r'_+', '_', final_base_for_file).strip('_') # Consolidate underscores
+        if self.options.get("syllabus", True) and not self._syllabus_seen:
+            self._try_syllabus(course["id"], course_dir)
 
-                    final_filename_to_save = final_base_for_file + final_ext
-                    final_filename_to_save = final_filename_to_save[:200] # Limit overall length
-                    
-                    if not final_base_for_file: # if base became empty after stripping underscores
-                        final_filename_to_save = "downloaded_file" + final_ext
+        return self.stats
 
-
-                    final_filepath = os.path.join(final_folder_path, final_filename_to_save)
-                    
-                    # Check if file already exists
-                    if os.path.exists(final_filepath):
-                        try:
-                            content_length = int(r.headers.get('content-length', 0))
-                            existing_size = os.path.getsize(final_filepath)
-                            
-                            if content_length > 0:
-                                # Server provided size - compare it
-                                if existing_size == content_length:
-                                    status_callback(f"          - SKIPPED (already exists with same size): {final_filename_to_save}")
-                                    continue
-                                # Sizes differ - will re-download
-                            else:
-                                # No Content-Length header - assume existing file is correct
-                                status_callback(f"          - SKIPPED (already exists): {final_filename_to_save}")
-                                continue
-                        except Exception:
-                            # If any error checking, skip the file (assume it's good)
-                            status_callback(f"          - SKIPPED (already exists): {final_filename_to_save}")
-                            continue
-
-                    # Download the file
-                    with open(final_filepath, 'wb') as f:
-                        for chunk in r.iter_content(chunk_size=8192):
-                            if chunk:  # filter out keep-alive new chunks
-                                f.write(chunk)
-                    status_callback(f"          - SAVED: {final_filename_to_save}")
-
-            except requests.exceptions.RequestException as e_req: status_callback(f"          - FAILED (Request Error): {original_name} - {e_req}")
-            except IOError as e_io: status_callback(f"          - FAILED (File IO Error): {original_name} - {e_io}")
-            except Exception as e: status_callback(f"          - FAILED (General Error): {original_name} - {e}")
-        
-        elif item_type == "WebLink":
-            status_callback(f"        ({i+1}/{len(unique_content)}) Creating Link: {os.path.join(relative_path_within_section, original_name)}")
-            
-            # For WebLinks, 'clean_base_name' (derived from original_name) is what we want.
-            # Remove any characters that are invalid for filenames, including dots that aren't part of the final .url extension.
-            base_for_weblink = re.sub(r'[\\/*?:"<>|.]', "_", clean_base_name) # Replace dots with underscore
-            base_for_weblink = re.sub(r'_+', '_', base_for_weblink).strip('_') # Consolidate underscores
-            
-            if not base_for_weblink: base_for_weblink = "weblink_shortcut"
-
-            clean_link_filename = base_for_weblink[:195] + ".url" 
-            final_filepath = os.path.join(final_folder_path, clean_link_filename)
-            try:
-                with open(final_filepath, 'w', encoding='utf-8') as f: f.write(f"[InternetShortcut]\nURL={url}\n")
-                status_callback(f"          - LINK CREATED: {clean_link_filename}")
-            except Exception as e: status_callback(f"          - FAILED creating link: {clean_link_filename} - {e}")
+    # ------------------------------------------------------------ tree walk
+    def _walk(self, course_id, folder_id, dir_path, depth):
+        if folder_id is None:
+            path = f"{API_ROOT}/courses/{course_id}/contents"
         else:
-            status_callback(f"        ({i+1}/{len(unique_content)}) Skipping item of type '{item_type}': {original_name}")
+            path = f"{API_ROOT}/courses/{course_id}/contents/{folder_id}/children"
+
+        try:
+            items = self.client.get_all(path)
+        except UltraError as exc:
+            self.status(f"{'  ' * depth}! Could not read contents: {exc}")
+            if depth == 0:
+                self._root_failed = True
+            return
+
+        items.sort(key=lambda item: (item.get("position") or 0, item.get("title") or ""))
+
+        for item in items:
+            content_id = item.get("id")
+            if not content_id:
+                continue
+            handler = ((item.get("contentHandler") or {}).get("id") or "").strip()
+            title = (item.get("title") or content_id).strip()
+            kind = kind_for_handler(handler, item)
+
+            if kind == "folder":
+                sub_dir = os.path.join(
+                    dir_path, self._alloc(dir_path, sanitize_component(title))
+                )
+                os.makedirs(sub_dir, exist_ok=True)
+                self.status(f"{'  ' * depth}+ Folder: {title}")
+                self._walk(course_id, content_id, sub_dir, depth + 1)
+
+            elif kind == "file":
+                self._handle_file(course_id, item, title, dir_path)
+
+            elif kind == "document":
+                if "syllabus" in handler or title.lower().startswith("syllabus"):
+                    self._syllabus_seen = True
+                if self.options.get("documents", True):
+                    self._handle_document(course_id, item, title, dir_path)
+                else:
+                    self.status(f"{'  ' * depth}- Document skipped: {title}")
+
+            elif kind == "link":
+                if self.options.get("links", True):
+                    self._handle_link(item, title, dir_path)
+                else:
+                    self.status(f"{'  ' * depth}- Link skipped: {title}")
+
+            elif kind == "assessment":
+                self._handle_assessment(course_id, item, title, dir_path)
+
+            else:
+                self._handle_other(course_id, item, title, dir_path)
+
+    # ------------------------------------------------------------- handlers
+    def _handle_file(self, course_id, item, title, dir_path):
+        self.status(f"        File: {title}")
+        downloaded = self._download_attachments(
+            course_id, item.get("id"), dir_path, title
+        )
+        if not downloaded:
+            # No attachment resource: fall back to any embedded body files.
+            if item.get("body"):
+                self._download_embeds(course_id, dir_path, title, item.get("body"))
+            else:
+                self.status(f"          - no downloadable attachment for '{title}'")
+
+    def _handle_document(self, course_id, item, title, dir_path):
+        self.status(f"        Document: {title}")
+        body = item.get("body") or ""
+        if body:
+            link_map = self._download_embeds(course_id, dir_path, title, body)
+            for original, local in link_map.items():
+                body = body.replace(original, local)
+        if not body:
+            body = "<p><em>No content body was returned by the Blackboard API for this item.</em></p>"
+
+        filename = self._alloc(
+            dir_path,
+            sanitize_component(title, fallback=item.get("id", "document")) + ".html",
+        )
+        path = os.path.join(dir_path, filename)
+        try:
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(html_document(title, body))
+            self.stats["documents"] += 1
+            self.status(f"          SAVED: {filename}")
+        except OSError as exc:
+            self.status(f"          FAILED document {filename}: {exc}")
+
+    def _handle_link(self, item, title, dir_path):
+        handler = item.get("contentHandler") or {}
+        url = (
+            handler.get("url")
+            or handler.get("href")
+            or handler.get("absoluteUrl")
+            or item.get("url")
+        )
+        if not url:
+            for link in item.get("links") or []:
+                if link.get("href"):
+                    url = link["href"]
+                    break
+        if url:
+            self._write_url(dir_path, title, url)
+        else:
+            self.status(f"        - Link has no URL: {title}")
+
+    def _handle_assessment(self, course_id, item, title, dir_path):
+        self.status(f"        Assessment/Assignment: {title}")
+        outline_url = f"{BASE_URL}ultra/courses/{course_id}/outline"
+        self._write_url(dir_path, title, outline_url)
+        self._download_attachments(course_id, item.get("id"), dir_path, title)
+
+    def _handle_other(self, course_id, item, title, dir_path):
+        url = None
+        for link in item.get("links") or []:
+            if link.get("href"):
+                url = link["href"]
+                break
+        if url and url.startswith("/"):
+            url = BASE_URL.rstrip("/") + url
+        self._write_url(
+            dir_path, title, url or f"{BASE_URL}ultra/courses/{course_id}/outline"
+        )
+
+    # ---------------------------------------------------------- attachments
+    def _download_attachments(self, course_id, content_id, dir_path, title):
+        if not content_id:
+            return 0
+        try:
+            payload = self.client.get(
+                f"{API_ROOT}/courses/{course_id}/contents/{content_id}/attachments",
+                allow_404=True,
+            )
+        except UltraError as exc:
+            self.status(f"          - attachments lookup failed: {exc}")
+            return 0
+        if not payload:
+            return 0
+
+        count = 0
+        for attachment in payload.get("results") or []:
+            attachment_id = attachment.get("id")
+            if not attachment_id:
+                continue
+            name = (
+                attachment.get("fileName")
+                or attachment.get("name")
+                or f"{title}_{attachment_id}"
+            )
+            name = sanitize_component(name, fallback=attachment_id)
+            filename = self._alloc(dir_path, name)
+            dest = os.path.join(dir_path, filename)
+            url = (
+                f"{self.client.base}{API_ROOT}/courses/{course_id}/contents/"
+                f"{content_id}/attachments/{attachment_id}/download"
+            )
+            status, size, info = self.client.download(url, dest)
+            if status == "saved":
+                self.stats["files"] += 1
+                self.status(f"          SAVED: {filename} ({size} bytes)")
+                count += 1
+            elif status == "skipped":
+                self.stats["skipped"] += 1
+                self.status(f"          SKIPPED (exists): {filename}")
+                count += 1
+            else:
+                self.stats["failed"] += 1
+                self.status(f"          FAILED: {filename} - {info}")
+        return count
+
+    def _download_embeds(self, course_id, dir_path, title, body):
+        """Download files referenced inside an Ultra body. Returns url->name map."""
+        link_map = {}
+        for raw_url in extract_bbcswebdav_urls(body):
+            url = raw_url
+            if url.startswith("//"):
+                url = "https:" + url
+            elif url.startswith("/"):
+                url = BASE_URL.rstrip("/") + url
+            if not url.startswith("http"):
+                continue
+
+            parsed = urlparse(url)
+            name = unquote(os.path.basename(parsed.path)) or title
+            name = sanitize_component(name, fallback="file")
+            filename = self._alloc(dir_path, name)
+            dest = os.path.join(dir_path, filename)
+
+            status, size, info = self.client.download(url, dest)
+            if status == "failed":
+                separator = "&" if "?" in url else "?"
+                status, size, info = self.client.download(
+                    url + separator + "xythos-download=true", dest
+                )
+
+            if status == "saved":
+                self.stats["files"] += 1
+                self.status(f"          SAVED (embedded): {filename} ({size} bytes)")
+                link_map[raw_url] = filename
+            elif status == "skipped":
+                self.stats["skipped"] += 1
+                link_map[raw_url] = filename
+            else:
+                self.stats["failed"] += 1
+                self.status(f"          FAILED (embedded): {filename} - {info}")
+        return link_map
+
+    # -------------------------------------------------------- announcements
+    def _download_announcements(self, course_id, course_dir):
+        announcements = self.client.get_all(
+            f"{API_ROOT}/courses/{course_id}/announcements"
+        )
+        if not announcements:
+            self.status("    No announcements found.")
+            return
+
+        out_dir = os.path.join(course_dir, "Announcements")
+        os.makedirs(out_dir, exist_ok=True)
+        self.status(f"    Downloading {len(announcements)} announcement(s)...")
+
+        announcements.sort(key=lambda a: (a.get("created") or "", a.get("id") or ""))
+
+        for announcement in announcements:
+            title = (announcement.get("title") or "announcement").strip()
+            created = (announcement.get("created") or "")[:10]
+            body = announcement.get("body") or ""
+            if body:
+                link_map = self._download_embeds(course_id, out_dir, title, body)
+                for original, local in link_map.items():
+                    body = body.replace(original, local)
+
+            base_name = sanitize_component(
+                f"{created}_{title}".strip("_"), fallback="announcement"
+            )
+            filename = self._alloc(out_dir, base_name + ".html")
+            path = os.path.join(out_dir, filename)
+            try:
+                with open(path, "w", encoding="utf-8") as handle:
+                    handle.write(html_document(title, body))
+                self.stats["announcements"] += 1
+                self.status(f"        ANNOUNCEMENT: {filename}")
+            except OSError as exc:
+                self.status(f"        FAILED announcement {filename}: {exc}")
+
+    # -------------------------------------------------------------- syllabus
+    def _try_syllabus(self, course_id, course_dir):
+        """Best-effort: save the rendered syllabus page if the tenant exposes one."""
+        if self.driver is None:
+            return
+        url = f"{BASE_URL}ultra/courses/{course_id}/syllabus"
+        try:
+            self.driver.get(url)
+            time.sleep(3)
+            content = None
+            for selector in ("main", "#syllabus", ".syllabus", "[data-testid='syllabus']"):
+                try:
+                    elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
+                    if elements:
+                        content = elements[0].get_attribute("outerHTML")
+                        if content and len(content) > 200:
+                            break
+                except WebDriverException:
+                    continue
+            if not content or len(content) < 200:
+                self.status("    No syllabus page available.")
+                return
+            out_dir = os.path.join(course_dir, "Syllabus")
+            os.makedirs(out_dir, exist_ok=True)
+            filename = self._alloc(out_dir, "syllabus.html")
+            with open(os.path.join(out_dir, filename), "w", encoding="utf-8") as handle:
+                handle.write(html_document("Syllabus", content))
+            self.stats["documents"] += 1
+            self.status(f"    SYLLABUS SAVED: {filename}")
+        except Exception as exc:  # noqa: BLE001 - syllabus is best-effort
+            self.status(f"    Could not save syllabus: {exc}")
 
 
-# --- GUI Application Class (largely unchanged from your previous version with my UI tweaks) ---
+# =========================================================================== #
+# GUI
+# =========================================================================== #
+
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("Blackboard Course Downloader")
-        self.geometry("700x1000")
-        self.all_course_data = []
-        self.resizable(0,0)
+        self.title("KFUPM Blackboard Ultra Course Downloader")
+        self.geometry("720x1060")
+        self.resizable(0, 0)
 
-        # Configure grid layout (1x1)
+        self.all_course_data = []
+        self.course_checkboxes = []
+        self._save_timer = None
+        self._env_credentials = load_env_credentials()
+
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(0, weight=1)
 
         main_frame = ctk.CTkFrame(self)
         main_frame.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
 
-        # --- UI Widgets setup ---
         self.main_font = ctk.CTkFont(family="Roboto Medium", size=12)
         self.header_font = ctk.CTkFont(family="Roboto Medium", size=13, weight="bold")
-        self.button_font = ctk.CTkFont(family="Roboto Medium", size=14, weight="bold") # New font for buttons
-        
-        row_idx = 0 # Keeps track of the current grid row
+        self.button_font = ctk.CTkFont(family="Roboto Medium", size=14, weight="bold")
 
-        # Configure columns for the main frame to ensure alignment
-        # Column 0: Labels (Fixed width/content)
-        # Column 1: Entries (Expands)
-        # Column 2: Browse Button (Fixed width)
-        main_frame.grid_columnconfigure(0, weight=0) # Labels don't expand
-        main_frame.grid_columnconfigure(1, weight=1) # Entries expand
-        main_frame.grid_columnconfigure(2, weight=0) # Button doesn't expand
+        row_idx = 0
+        main_frame.grid_columnconfigure(0, weight=0)
+        main_frame.grid_columnconfigure(1, weight=1)
+        main_frame.grid_columnconfigure(2, weight=0)
 
         # Username
-        ctk.CTkLabel(main_frame, text="Username", font=self.header_font, text_color=("gray10", "gray90")).grid(row=row_idx, column=0, sticky="w", pady=(0, 5))
+        ctk.CTkLabel(main_frame, text="Username", font=self.header_font,
+                     text_color=("gray10", "gray90")).grid(
+            row=row_idx, column=0, sticky="w", pady=(0, 5))
         self.username_entry = ctk.CTkEntry(main_frame, width=200, font=self.main_font)
-        self.username_entry.grid(row=row_idx, column=1, columnspan=2, sticky="ew", pady=(0, 5), padx=(5, 0))
+        self.username_entry.grid(row=row_idx, column=1, columnspan=2, sticky="ew",
+                                 pady=(0, 5), padx=(5, 0))
         row_idx += 1
 
         # Password
-        ctk.CTkLabel(main_frame, text="Password", font=self.header_font, text_color=("gray10", "gray90")).grid(row=row_idx, column=0, sticky="w", pady=(0, 5))
-        self.password_entry = ctk.CTkEntry(main_frame, width=200, show="*", font=self.main_font)
-        self.password_entry.grid(row=row_idx, column=1, columnspan=2, sticky="ew", pady=(0, 5), padx=(5, 0))
+        ctk.CTkLabel(main_frame, text="Password", font=self.header_font,
+                     text_color=("gray10", "gray90")).grid(
+            row=row_idx, column=0, sticky="w", pady=(0, 5))
+        self.password_entry = ctk.CTkEntry(main_frame, width=200, show="*",
+                                           font=self.main_font)
+        self.password_entry.grid(row=row_idx, column=1, columnspan=2, sticky="ew",
+                                 pady=(0, 5), padx=(5, 0))
         row_idx += 1
 
-        # Download Path (Isolated Frame for Robustness)
-        # We use a separate frame spanning all columns to ensure the button layout is isolated from the main grid's resizing logic.
+        # Download path
         path_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
         path_frame.grid(row=row_idx, column=0, columnspan=3, sticky="ew", pady=(0, 5))
-        
-        # Configure grid within path_frame
-        path_frame.grid_columnconfigure(0, weight=0) # Label
-        path_frame.grid_columnconfigure(1, weight=1) # Entry
-        path_frame.grid_columnconfigure(2, weight=0) # Button
+        path_frame.grid_columnconfigure(0, weight=0)
+        path_frame.grid_columnconfigure(1, weight=1)
+        path_frame.grid_columnconfigure(2, weight=0)
 
-        # Label (Col 0) - Matches main grid Col 0 alignment
-        ctk.CTkLabel(path_frame, text="Download To", font=self.header_font, text_color=("gray10", "gray90")).grid(row=0, column=0, sticky="w", padx=(0, 5))
-        
-        # Entry (Col 1)
-        self.path_var = tk.StringVar(value=os.path.join(os.path.expanduser("~"), "Desktop", "KFUPM_Blackboard_Downloads"))
-        self.path_entry = ctk.CTkEntry(path_frame, textvariable=self.path_var, font=self.main_font)
-        self.path_entry.grid(row=0, column=1, sticky="ew", padx=(5, 5)) # Right padding to separate from button
-
-        # Browse Button (Col 2)
-        self.browse_button = ctk.CTkButton(path_frame, text="Browse", width=80, command=self.browse_directory, font=self.button_font)
-        self.browse_button.grid(row=0, column=2, sticky="ew", padx=(0, 0))
-        
-        # Force button to top layer to prevent any clipping issues
+        ctk.CTkLabel(path_frame, text="Download To", font=self.header_font,
+                     text_color=("gray10", "gray90")).grid(
+            row=0, column=0, sticky="w", padx=(0, 5))
+        self.path_var = tk.StringVar(
+            value=os.path.join(os.path.expanduser("~"), "Desktop",
+                               "KFUPM_Blackboard_Downloads")
+        )
+        self.path_entry = ctk.CTkEntry(path_frame, textvariable=self.path_var,
+                                       font=self.main_font)
+        self.path_entry.grid(row=0, column=1, sticky="ew", padx=(5, 5))
+        self.browse_button = ctk.CTkButton(path_frame, text="Browse", width=80,
+                                           command=self.browse_directory,
+                                           font=self.button_font)
+        self.browse_button.grid(row=0, column=2, sticky="ew")
         self.browse_button.lift()
-        
         row_idx += 1
 
-        # Browser Selection Frame
+        # Browser selection
         browser_frame = ctk.CTkFrame(main_frame)
-        browser_frame.grid(row=row_idx, column=0, columnspan=3, sticky="ew", pady=10, padx=2)
-        # Explicitly set text_color to ensure visibility in dark mode
-        # Left aligned
-        ctk.CTkLabel(browser_frame, text="Browser for Automation (must be installed)", font=self.header_font, text_color=("gray10", "gray90")).pack(side="top", anchor="w", pady=5, padx=5)
-        
-        # Container for radio buttons (Left aligned)
+        browser_frame.grid(row=row_idx, column=0, columnspan=3, sticky="ew",
+                           pady=10, padx=2)
+        ctk.CTkLabel(browser_frame,
+                     text="Browser for login automation (must be installed)",
+                     font=self.header_font,
+                     text_color=("gray10", "gray90")).pack(
+            side="top", anchor="w", pady=5, padx=5)
         rb_frame = ctk.CTkFrame(browser_frame, fg_color="transparent")
         rb_frame.pack(side="top", anchor="w", pady=5, padx=5)
-
-        self.browser_var = tk.StringVar(value="firefox") 
-        self.firefox_rb = ctk.CTkRadioButton(rb_frame, text="Use Firefox", variable=self.browser_var, value="firefox", font=self.header_font, text_color=("gray10", "gray90"))
+        self.browser_var = tk.StringVar(value="firefox")
+        self.firefox_rb = ctk.CTkRadioButton(
+            rb_frame, text="Use Firefox", variable=self.browser_var, value="firefox",
+            font=self.header_font, text_color=("gray10", "gray90"))
         self.firefox_rb.pack(side="left", padx=(0, 20))
-        
-        self.chrome_rb = ctk.CTkRadioButton(rb_frame, text="Use Chrome", variable=self.browser_var, value="chrome", font=self.header_font, text_color=("gray10", "gray90"))
-        self.chrome_rb.pack(side="left", padx=0)
-        
+        self.chrome_rb = ctk.CTkRadioButton(
+            rb_frame, text="Use Chrome", variable=self.browser_var, value="chrome",
+            font=self.header_font, text_color=("gray10", "gray90"))
+        self.chrome_rb.pack(side="left")
         row_idx += 1
 
-        # Headless Checkbox
+        # Headless
         self.headless_var = tk.BooleanVar(value=True)
-        self.headless_check = ctk.CTkCheckBox(main_frame, text="Run in Headless Mode (no browser window visible - recommended)", variable=self.headless_var, font=self.header_font, text_color=("gray10", "gray90"))
+        self.headless_check = ctk.CTkCheckBox(
+            main_frame,
+            text="Run in Headless Mode (no browser window visible - recommended)",
+            variable=self.headless_var, font=self.header_font,
+            text_color=("gray10", "gray90"))
         self.headless_check.grid(row=row_idx, column=0, columnspan=3, sticky="w", pady=5)
         row_idx += 1
 
-        # Scan Button
-        self.scan_button = ctk.CTkButton(main_frame, text="1. Scan Courses", command=self.start_scan_thread, font=self.button_font, height=40)
+        # Content options
+        options_frame = ctk.CTkFrame(main_frame)
+        options_frame.grid(row=row_idx, column=0, columnspan=3, sticky="ew",
+                           pady=(0, 5), padx=2)
+        ctk.CTkLabel(options_frame, text="What to download", font=self.header_font,
+                     text_color=("gray10", "gray90")).pack(
+            side="top", anchor="w", pady=5, padx=5)
+        options_row = ctk.CTkFrame(options_frame, fg_color="transparent")
+        options_row.pack(side="top", anchor="w", pady=5, padx=5)
+        self.documents_var = tk.BooleanVar(value=True)
+        self.links_var = tk.BooleanVar(value=True)
+        self.announcements_var = tk.BooleanVar(value=True)
+        self.syllabus_var = tk.BooleanVar(value=True)
+        for var, text in (
+            (self.documents_var, "Ultra documents (.html)"),
+            (self.links_var, "External links (.url)"),
+            (self.announcements_var, "Announcements"),
+            (self.syllabus_var, "Syllabus"),
+        ):
+            ctk.CTkCheckBox(options_row, text=text, variable=var,
+                            font=self.header_font,
+                            text_color=("gray10", "gray90")).pack(
+                side="left", padx=(0, 12))
+        row_idx += 1
+
+        # Scan button
+        self.scan_button = ctk.CTkButton(main_frame, text="1. Scan Courses",
+                                         command=self.start_scan_thread,
+                                         font=self.button_font, height=40)
         self.scan_button.grid(row=row_idx, column=0, columnspan=3, sticky="ew", pady=10)
         row_idx += 1
 
-        # Select Courses Label (Left aligned)
-        ctk.CTkLabel(main_frame, text="Select Course(s) to Download", font=self.header_font, text_color=("gray10", "gray90")).grid(row=row_idx, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        # Course list
+        ctk.CTkLabel(main_frame, text="Select Course(s) to Download",
+                     font=self.header_font, text_color=("gray10", "gray90")).grid(
+            row=row_idx, column=0, columnspan=3, sticky="w", pady=(10, 0))
         row_idx += 1
-        
-        # Course List (Scrollable Frame with Checkboxes)
-        # Ensure the frame has a fixed height or expands properly. 
-        # We set height to something reasonable so it scrolls if content exceeds it.
-        self.course_scroll_frame = ctk.CTkScrollableFrame(main_frame, label_text="Available Courses", label_font=self.header_font, height=200)
-        self.course_scroll_frame.grid(row=row_idx, column=0, columnspan=3, sticky="nsew", pady=5)
-        
-        # Explicitly bind scroll events for Linux (Button-4/5) and Windows (MouseWheel) to the canvas
-        # This helps if the default binding isn't catching focus properly
+
+        self.course_scroll_frame = ctk.CTkScrollableFrame(
+            main_frame, label_text="Available Courses", label_font=self.header_font,
+            height=200)
+        self.course_scroll_frame.grid(row=row_idx, column=0, columnspan=3,
+                                      sticky="nsew", pady=5)
         try:
             canvas = self.course_scroll_frame._parent_canvas
             canvas.bind_all("<Button-4>", lambda e: canvas.yview_scroll(-1, "units"))
             canvas.bind_all("<Button-5>", lambda e: canvas.yview_scroll(1, "units"))
-            canvas.bind_all("<MouseWheel>", lambda e: canvas.yview_scroll(-1 * (e.delta // 120), "units"))
-        except Exception: pass
-
-        self.course_checkboxes = [] # To store checkbox widgets
+            canvas.bind_all("<MouseWheel>",
+                            lambda e: canvas.yview_scroll(-1 * (e.delta // 120), "units"))
+        except Exception:
+            pass
         row_idx += 1
 
-        # Download Button
-        self.download_button = ctk.CTkButton(main_frame, text="2. Download Selected Course(s)", command=self.start_download_thread, state="disabled", height=40, font=self.button_font)
-        self.download_button.grid(row=row_idx, column=0, columnspan=3, pady=15, sticky="ew")
+        # Download button
+        self.download_button = ctk.CTkButton(
+            main_frame, text="2. Download Selected Course(s)",
+            command=self.start_download_thread, state="disabled", height=40,
+            font=self.button_font)
+        self.download_button.grid(row=row_idx, column=0, columnspan=3, pady=15,
+                                  sticky="ew")
         row_idx += 1
 
-        # Status & Logs Frame
+        # Status + progress
         status_frame = ctk.CTkFrame(main_frame)
-        status_frame.grid(row=row_idx, column=0, columnspan=3, sticky="nsew", pady=(10,0))
+        status_frame.grid(row=row_idx, column=0, columnspan=3, sticky="nsew",
+                          pady=(10, 0))
         status_frame.columnconfigure(0, weight=1)
         status_frame.rowconfigure(0, weight=1)
-
-        self.status_text = ctk.CTkTextbox(status_frame, height=150, state="disabled", wrap="word", font=("Consolas", 11))
+        self.status_text = ctk.CTkTextbox(status_frame, height=150, state="disabled",
+                                          wrap="word", font=("Consolas", 11))
         self.status_text.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
-        row_idx +=1 
-
-        # Progress Bar
-        self.progress_bar = ctk.CTkProgressBar(main_frame, orientation="horizontal", mode="determinate")
-        self.progress_bar.grid(row=row_idx, column=0, columnspan=3, sticky="ew", pady=(5,10))
-        self.progress_bar.set(0)
         row_idx += 1
 
-        # --- Column and Row Configurations for main_frame ---
-        main_frame.rowconfigure(9, weight=1)
-        
-        # Make the course list row expandable
-        # The course list is at a specific row index. Let's find it dynamically or hardcode if we know.
-        # Based on the code above:
-        # 0: Username, 1: Password, 2: Path, 3: Browser, 4: Headless, 5: Scan Button, 6: Label, 7: Course List
-        main_frame.rowconfigure(7, weight=1) 
-        main_frame.columnconfigure(1, weight=1)
-        
-        # Load saved settings (credentials, path, etc.)
-        self.load_credentials()
-        self.username_entry.bind("<KeyRelease>", lambda e: self.save_credentials_throttled())
-        self.password_entry.bind("<KeyRelease>", lambda e: self.save_credentials_throttled())
-        self.path_entry.bind("<KeyRelease>", lambda e: self.save_credentials_throttled())
-        self._save_timer = None
+        self.progress_bar = ctk.CTkProgressBar(main_frame, orientation="horizontal",
+                                               mode="determinate")
+        self.progress_bar.grid(row=row_idx, column=0, columnspan=3, sticky="ew",
+                               pady=(5, 10))
+        self.progress_bar.set(0)
 
+        main_frame.rowconfigure(8, weight=1)   # course list
+        main_frame.rowconfigure(10, weight=1)  # status log
+
+        self.load_credentials()
+        if self._env_credentials.get("username"):
+            self.update_status("Loaded credentials from .env")
+        for widget in (self.username_entry, self.password_entry, self.path_entry):
+            widget.bind("<KeyRelease>", lambda e: self.save_credentials_throttled())
+
+    # ------------------------------------------------------------- settings
     def save_credentials_throttled(self):
-        if self._save_timer: self.after_cancel(self._save_timer)
-        self._save_timer = self.after(1000, self.save_credentials) 
+        if self._save_timer:
+            self.after_cancel(self._save_timer)
+        self._save_timer = self.after(1000, self.save_credentials)
 
     def save_credentials(self):
         try:
-            config_dir = os.path.join(os.path.expanduser("~"), ".kfupm_bb_downloader")
-            os.makedirs(config_dir, exist_ok=True)
-            config_file = os.path.join(config_dir, "config.ini")
-            with open(config_file, "w") as f:
-                f.write(f"username={self.username_entry.get()}\n")
-                # Storing password in plain text - UNSAFE, for local convenience only.
-                # Consider using 'keyring' for more secure storage.
-                f.write(f"password={self.password_entry.get()}\n") 
-                f.write(f"download_path={self.path_var.get()}\n")
-                f.write(f"browser_choice={self.browser_var.get()}\n")
-                f.write(f"headless_mode={self.headless_var.get()}\n")
-        except Exception as e:
-            self.update_status(f"Warning: Could not save settings: {e}")
+            os.makedirs(CONFIG_DIR, exist_ok=True)
+            # If credentials come from .env, keep them out of config.ini.
+            has_env_creds = bool(self._env_credentials.get("username"))
+            with open(CONFIG_FILE, "w", encoding="utf-8") as handle:
+                if not has_env_creds:
+                    handle.write(f"username={self.username_entry.get()}\n")
+                    # Stored in plain text for local convenience only.
+                    handle.write(f"password={self.password_entry.get()}\n")
+                handle.write(f"download_path={self.path_var.get()}\n")
+                handle.write(f"browser_choice={self.browser_var.get()}\n")
+                handle.write(f"headless_mode={self.headless_var.get()}\n")
+                handle.write(f"documents={self.documents_var.get()}\n")
+                handle.write(f"links={self.links_var.get()}\n")
+                handle.write(f"announcements={self.announcements_var.get()}\n")
+                handle.write(f"syllabus={self.syllabus_var.get()}\n")
+        except OSError as exc:
+            self.update_status(f"Warning: Could not save settings: {exc}")
 
     def load_credentials(self):
+        # .env credentials take priority over anything saved in config.ini.
+        if self._env_credentials.get("username"):
+            self.username_entry.insert(0, self._env_credentials["username"])
+        if self._env_credentials.get("password"):
+            self.password_entry.insert(0, self._env_credentials["password"])
+
         try:
-            config_file = os.path.join(os.path.expanduser("~"), ".kfupm_bb_downloader", "config.ini")
-            if os.path.exists(config_file):
-                with open(config_file, "r") as f:
-                    for line in f:
-                        name, value = line.strip().split("=", 1)
-                        if name == "username": self.username_entry.insert(0, value)
-                        elif name == "password": self.password_entry.insert(0, value)
-                        elif name == "download_path": self.path_var.set(value)
-                        elif name == "browser_choice": self.browser_var.set(value)
-                        elif name == "headless_mode": self.headless_var.set(value.lower() == 'true')
-        except Exception as e:
-            self.update_status(f"Warning: Could not load saved settings: {e}")
+            if not os.path.exists(CONFIG_FILE):
+                return
+            with open(CONFIG_FILE, "r", encoding="utf-8") as handle:
+                for line in handle:
+                    if "=" not in line:
+                        continue
+                    name, value = line.strip().split("=", 1)
+                    if name == "username":
+                        if not self._env_credentials.get("username"):
+                            self.username_entry.insert(0, value)
+                    elif name == "password":
+                        if not self._env_credentials.get("password"):
+                            self.password_entry.insert(0, value)
+                    elif name == "download_path":
+                        self.path_var.set(value)
+                    elif name == "browser_choice":
+                        self.browser_var.set(value)
+                    elif name == "headless_mode":
+                        self.headless_var.set(value.lower() == "true")
+                    elif name == "documents":
+                        self.documents_var.set(value.lower() == "true")
+                    elif name == "links":
+                        self.links_var.set(value.lower() == "true")
+                    elif name == "announcements":
+                        self.announcements_var.set(value.lower() == "true")
+                    elif name == "syllabus":
+                        self.syllabus_var.set(value.lower() == "true")
+        except (OSError, ValueError) as exc:
+            self.update_status(f"Warning: Could not load saved settings: {exc}")
 
     def browse_directory(self):
         directory = filedialog.askdirectory(initialdir=self.path_var.get())
-        if directory: 
+        if directory:
             self.path_var.set(directory)
-            self.save_credentials() 
+            self.save_credentials()
 
+    # --------------------------------------------------------------- status
     def update_status(self, message):
-        if self and self.status_text: 
+        if self and self.status_text:
             self.after(0, self._update_status_thread_safe, message)
-    
+
     def _update_status_thread_safe(self, message):
         try:
             self.status_text.configure(state="normal")
             self.status_text.insert(tk.END, message + "\n")
             self.status_text.see(tk.END)
             self.status_text.configure(state="disabled")
-        except tk.TclError: pass # Handle if widget is destroyed
+        except tk.TclError:
+            pass
 
     def update_progress(self, value):
         if self and self.progress_bar:
-             self.after(0, self._update_progress_thread_safe, value)
+            self.after(0, self._update_progress_thread_safe, value)
 
     def _update_progress_thread_safe(self, value):
         try:
-            self.progress_bar.set(value / 100)
-        except tk.TclError: pass
+            self.progress_bar.set(max(0.0, min(1.0, value / 100.0)))
+        except tk.TclError:
+            pass
+
+    def _show_error(self, title, message):
+        self.after(0, lambda: messagebox.showerror(title, message))
+
+    def _show_info(self, title, message):
+        self.after(0, lambda: messagebox.showinfo(title, message))
 
     def set_ui_state(self, enabled):
         state = "normal" if enabled else "disabled"
-        widgets_to_toggle = [
+        widgets = [
             self.username_entry, self.password_entry, self.path_entry,
             self.browse_button, self.scan_button, self.headless_check,
-            self.firefox_rb, self.chrome_rb
+            self.firefox_rb, self.chrome_rb,
         ]
-        for widget in widgets_to_toggle:
-            if widget: widget.configure(state=state)
-        
-        # Download button depends on courses being scanned
+        for widget in widgets:
+            if widget is None:
+                continue
+            try:
+                widget.configure(state=state)
+            except (tk.TclError, ValueError):
+                pass
+
         if enabled and self.all_course_data:
             self.download_button.configure(state="normal")
         else:
             self.download_button.configure(state="disabled")
 
+    # ----------------------------------------------------------------- scan
     def start_scan_thread(self):
         self.set_ui_state(False)
-        # Clear previous checkboxes
-        for cb in self.course_checkboxes:
-            cb.destroy()
+        for checkbox in self.course_checkboxes:
+            checkbox["checkbox"].destroy()
         self.course_checkboxes = []
-        
-        self.all_course_data = [] # Clear previous scan results
-        # Clear status text on new scan
-        self.status_text.configure(state="normal"); self.status_text.delete(1.0, tk.END); self.status_text.configure(state="disabled")
+        self.all_course_data = []
+        self.status_text.configure(state="normal")
+        self.status_text.delete(1.0, tk.END)
+        self.status_text.configure(state="disabled")
         self.update_status("Scan initiated...")
         threading.Thread(target=self.scan_courses_task, daemon=True).start()
 
     def scan_courses_task(self):
-        username = self.username_entry.get(); password = self.password_entry.get()
+        username = self.username_entry.get().strip()
+        password = self.password_entry.get()
         if not username or not password:
-            messagebox.showerror("Input Error", "Username and Password are required.")
-            self.after(0, self.set_ui_state, True); return
-        
-        self.save_credentials() 
+            self._show_error("Input Error", "Username and Password are required.")
+            self.after(0, self.set_ui_state, True)
+            return
+
+        self.save_credentials()
         driver = None
         try:
-            browser_choice = self.browser_var.get()
-            driver = setup_driver(browser_choice, self.update_status, self.headless_var.get())
-            
-            self.update_status("Logging in to Blackboard...")
-            login(driver, username, password) # Assuming login confirms success by not raising error
-            self.update_status("Login successful. Fetching course list...")
-            
-            # This is the call to the reverted function
-            self.all_course_data = get_all_terms_and_courses(driver, self.update_status) 
-            
+            driver = setup_driver(
+                self.browser_var.get(), self.update_status, self.headless_var.get()
+            )
+            cookies = login(driver, username, password, self.update_status)
+            client = UltraClient(BASE_URL, cookies, self.update_status, driver=driver)
+            self.all_course_data = list_terms_and_courses(client, self.update_status)
+
             if self.all_course_data:
-                self.update_status(f"Scan complete. Found {len(self.all_course_data)} courses across terms.")
-                # Sort by term (desc) then course name (asc)
-                self.all_course_data.sort(key=lambda x: (x.get('term', 'Unknown Term'), x.get('name', '')), reverse=False) # Term ascending might be more natural
-                self.all_course_data.sort(key=lambda x: x.get('term', 'Unknown Term'), reverse=True) # Then reverse by term for newest first
-
-                def update_listbox_ui():
-                    # Clear again just in case
-                    for cb in self.course_checkboxes:
-                        if isinstance(cb, dict): cb['checkbox'].destroy()
-                        elif isinstance(cb, ctk.CTkCheckBox): cb.destroy()
-                        else: cb.destroy()
-                    self.course_checkboxes = []
-                    
-                    # Clear all children of scroll frame to be safe
-                    for child in self.course_scroll_frame.winfo_children():
-                        child.destroy()
-
-                    current_term_header = None 
-                    
-                    # Helper to toggle all checkboxes for a term
-                    def toggle_term(term_val, state_var):
-                        new_state = state_var.get()
-                        for item in self.course_checkboxes:
-                            if item['course_data'].get('term') == term_val:
-                                if new_state: item['checkbox'].select()
-                                else: item['checkbox'].deselect()
-
-                    for course in self.all_course_data:
-                        term = course.get('term', 'Unknown Term')
-                        if term != current_term_header:
-                            current_term_header = term
-                            # Term Header with Select All Checkbox
-                            term_var = tk.BooleanVar(value=False)
-                            term_cb = ctk.CTkCheckBox(self.course_scroll_frame, text=f"--- {current_term_header} ---", 
-                                                      variable=term_var, font=self.header_font, text_color=("gray10", "gray90"),
-                                                      command=lambda t=current_term_header, v=term_var: toggle_term(t, v))
-                            term_cb.pack(side="top", fill="x", padx=5, pady=(10, 2)) # Changed to pack top for vertical list
-                            
-                            # Container for courses in this term (Vertical Layout - Single Column)
-                            self.current_term_course_frame = ctk.CTkFrame(self.course_scroll_frame, fg_color="transparent")
-                            self.current_term_course_frame.pack(fill="x", padx=15, pady=2)
-                            # No column config needed for pack
-                            self.term_course_idx = 0
-
-                        # Add checkbox for the course
-                        course_name = course['name']
-                        cb = ctk.CTkCheckBox(self.current_term_course_frame, text=course_name, font=self.header_font, text_color=("gray10", "gray90"))
-                        # Revert to pack for single column vertical list
-                        cb.pack(fill="x", anchor="w", pady=2)
-                        
-                        self.course_checkboxes.append({"checkbox": cb, "course_data": course})
-                        self.term_course_idx += 1
-                        
-                    self.download_button.configure(state="normal") # Enable download if courses found
-                self.after(0, update_listbox_ui)
+                self.all_course_data.sort(
+                    key=lambda item: (item.get("term", ""), item.get("name", ""))
+                )
+                self.update_status(
+                    f"Scan complete. Found {len(self.all_course_data)} course(s)."
+                )
+                self.after(0, self._populate_course_list)
             else:
-                self.update_status("Scan complete: No terms or courses found. Please check your Blackboard or the selectors in the script if the page structure has changed.")
-                # Ensure download button is disabled if no courses
+                self.update_status("Scan complete: no courses were found.")
                 self.after(0, lambda: self.download_button.configure(state="disabled"))
 
-        except RuntimeError as e: 
-            self.update_status(f"Driver Error: {e}")
-            messagebox.showerror("Driver Setup Error", str(e))
-        except Exception as e:
-            self.update_status(f"An error occurred during scan: {e}")
-            import traceback; self.update_status(traceback.format_exc())
-            messagebox.showerror("Scan Error", f"An unexpected error occurred during scan: {e}")
+        except RuntimeError as exc:
+            self.update_status(f"Driver/Login error: {exc}")
+            self._show_error("Login Error", str(exc))
+        except UltraAuthError as exc:
+            self.update_status(f"Authentication error: {exc}")
+            self._show_error("Authentication Error", str(exc))
+        except Exception as exc:  # noqa: BLE001
+            self.update_status(f"An error occurred during scan: {exc}")
+            self.update_status(traceback.format_exc())
+            self._show_error("Scan Error", f"An unexpected error occurred: {exc}")
         finally:
-            if driver: 
-                try: driver.quit()
-                except Exception as e_quit: self.update_status(f"Note: Error quitting driver: {e_quit}")
+            if driver:
+                try:
+                    driver.quit()
+                except WebDriverException as exc:
+                    self.update_status(f"Note: error quitting driver: {exc}")
             self.after(0, self.set_ui_state, True)
-            
-    def start_download_thread(self):
-        selected_courses = []
-        for item in self.course_checkboxes:
-            if item["checkbox"].get() == 1:
-                selected_courses.append(item["course_data"])
 
-        if not selected_courses:
-            messagebox.showwarning("No Selection", "Please select at least one course to download.")
+    def _populate_course_list(self):
+        for child in self.course_scroll_frame.winfo_children():
+            child.destroy()
+        self.course_checkboxes = []
+
+        current_term = None
+        term_course_frame = None
+
+        def toggle_term(term_value, state_var):
+            new_state = state_var.get()
+            for item in self.course_checkboxes:
+                if item["course_data"].get("term") == term_value:
+                    if new_state:
+                        item["checkbox"].select()
+                    else:
+                        item["checkbox"].deselect()
+
+        for course in self.all_course_data:
+            term = course.get("term", "Unknown Term")
+            if term != current_term:
+                current_term = term
+                term_var = tk.BooleanVar(value=False)
+                term_checkbox = ctk.CTkCheckBox(
+                    self.course_scroll_frame, text=f"--- {current_term} ---",
+                    variable=term_var, font=self.header_font,
+                    text_color=("gray10", "gray90"),
+                    command=lambda t=current_term, v=term_var: toggle_term(t, v))
+                term_checkbox.pack(side="top", fill="x", padx=5, pady=(10, 2))
+                term_course_frame = ctk.CTkFrame(self.course_scroll_frame,
+                                                 fg_color="transparent")
+                term_course_frame.pack(fill="x", padx=15, pady=2)
+
+            checkbox = ctk.CTkCheckBox(term_course_frame, text=course["name"],
+                                       font=self.header_font,
+                                       text_color=("gray10", "gray90"))
+            checkbox.pack(fill="x", anchor="w", pady=2)
+            self.course_checkboxes.append(
+                {"checkbox": checkbox, "course_data": course}
+            )
+
+        self.download_button.configure(state="normal")
+
+    # ------------------------------------------------------------- download
+    def start_download_thread(self):
+        selected = [
+            item["course_data"]
+            for item in self.course_checkboxes
+            if item["checkbox"].get() == 1
+        ]
+        if not selected:
+            messagebox.showwarning("No Selection",
+                                   "Please select at least one course to download.")
             return
 
         self.set_ui_state(False)
         self.update_status("Download initiated...")
-        # Pass selected courses directly
-        threading.Thread(target=self.download_courses_task, args=(selected_courses,), daemon=True).start()
+        threading.Thread(
+            target=self.download_courses_task, args=(selected,), daemon=True
+        ).start()
 
     def download_courses_task(self, courses_to_process):
-        username = self.username_entry.get(); password = self.password_entry.get()
-        
-        self.update_status(f"Starting download for {len(courses_to_process)} selected course(s)...")
+        username = self.username_entry.get().strip()
+        password = self.password_entry.get()
+        options = {
+            "documents": self.documents_var.get(),
+            "links": self.links_var.get(),
+            "announcements": self.announcements_var.get(),
+            "syllabus": self.syllabus_var.get(),
+        }
+
         driver = None
         try:
-            browser_choice = self.browser_var.get()
-            driver = setup_driver(browser_choice, self.update_status, self.headless_var.get())
-            self.update_status("Logging in for download session...")
-            login_cookies = login(driver, username, password)
-            self.update_status("Login successful for download.")
-            
-            session = requests.Session()
-            for cookie in login_cookies: 
-                session.cookies.set(cookie['name'], cookie['value'], domain=cookie.get('domain'), path=cookie.get('path'))
+            driver = setup_driver(
+                self.browser_var.get(), self.update_status, self.headless_var.get()
+            )
+            cookies = login(driver, username, password, self.update_status)
+            client = UltraClient(BASE_URL, cookies, self.update_status, driver=driver)
+            client.wait_until_authenticated()
+            downloader = CourseDownloader(client, driver, self.update_status, options)
 
-            total_courses = len(courses_to_process)
-            for course_idx, course in enumerate(courses_to_process):
-                self.after(0, self.update_progress, 0) 
-                
-                term_name_cleaned = course.get('term', 'Unknown_Term') 
-                course_name_cleaned = course['name'] 
-                
-                base_course_download_dir = os.path.join(self.path_var.get(), term_name_cleaned, course_name_cleaned)
-                os.makedirs(base_course_download_dir, exist_ok=True)
-                
-                self.update_status(f"\n--- ({course_idx+1}/{total_courses}) Processing course: {course['name']} (Term: {term_name_cleaned}) ---")
-                course_main_url = course['url']
-                
-                # --- OPTIMIZATION START ---
-                self.update_status(f"  Navigating to course home: {course_main_url}")
-                driver.get(course_main_url)
-                course_page_wait = WebDriverWait(driver, 15) # Slightly shorter wait for main page elements
+            total = len(courses_to_process)
+            self.update_status(
+                f"Starting download for {total} selected course(s)..."
+            )
+
+            for index, course in enumerate(courses_to_process):
+                self.update_status(
+                    f"\n--- ({index + 1}/{total}) Course: {course['name']} "
+                    f"(Term: {course.get('term', 'Unknown')}) ---"
+                )
+                self.after(0, self.update_progress, (index / total) * 100)
                 try:
-                    course_page_wait.until(EC.presence_of_element_located((By.ID, "courseMenuPalette_contents")))
-                    self.update_status("    Course home page loaded.")
-                except TimeoutException:
-                    self.update_status(f"    Timeout waiting for course menu on main page for course '{course_name_cleaned}'. Skipping this course's sections.")
-                    continue # To next course if course home doesn't load its menu
+                    downloader.run(course, self.path_var.get())
+                except UltraAuthError as exc:
+                    self.update_status(f"  ! Session error, stopping: {exc}")
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    self.update_status(f"  ! Error processing course: {exc}")
+                    self.update_status(traceback.format_exc())
+                self.after(0, self.update_progress, ((index + 1) / total) * 100)
 
-                # --- IDENTIFY AVAILABLE SECTIONS FIRST ---
-                self.update_status("    Identifying available sections...")
-                available_sections_to_scrape = []
-                for section_name_candidate in TARGET_COURSE_SECTIONS:
-                    try:
-                        # Use a very short timeout for checking existence of each link
-                        # driver.find_element is immediate, WebDriverWait allows a small grace period
-                        temp_wait = WebDriverWait(driver, 2) # Short wait: 2 seconds to find link
-                        section_link_xpath = f"//ul[@id='courseMenuPalette_contents']//a[.//span[normalize-space(.)=\"{section_name_candidate}\"]]"
-                        link_element = temp_wait.until(EC.presence_of_element_located((By.XPATH, section_link_xpath)))
-                        link_url = link_element.get_attribute('href')
-                        
-                        if link_url and ("listContent.jsp" in link_url or "launchLink.jsp" in link_url):
-                             available_sections_to_scrape.append({"name": section_name_candidate, "url": link_url})
-                             self.update_status(f"    + Section '{section_name_candidate}' is available (URL: {link_url})")
-                        else:
-                            self.update_status(f"    - Section '{section_name_candidate}' found, but URL is not a content page type ({link_url}). Skipping.")
-                    except TimeoutException:
-                        self.update_status(f"    - Section '{section_name_candidate}' link not found quickly. Skipping this section.")
-                    except NoSuchElementException: # Should be caught by TimeoutException with WebDriverWait
-                        self.update_status(f"    - Section '{section_name_candidate}' link (NoSuchElement). Skipping this section.")
-
-                # --- SCRAPE COURSE HOMEPAGE ---
-                # Check if homepage has content_listContainer, and get actual URL after any redirects
-                homepage_has_content = False
-                homepage_actual_url = None
-                
-                try:
-                    # Try to find content_listContainer on homepage (short timeout)
-                    WebDriverWait(driver, 3).until(EC.presence_of_element_located((By.ID, "content_listContainer")))
-                    homepage_has_content = True
-                    # NOW get the URL after redirect
-                    homepage_actual_url = driver.current_url
-                    self.update_status(f"    Homepage has content (URL after redirect: {homepage_actual_url})")
-                except TimeoutException:
-                    self.update_status("    Homepage has no content_listContainer - will not scrape homepage.")
-                
-                # Only scrape homepage if it has content
-                if homepage_has_content:
-                    # Helper function to extract content_id from Blackboard URLs for comparison
-                    def get_content_id(url):
-                        """Extract content_id parameter from Blackboard URL"""
-                        if not url or 'content_id=' not in url:
-                            return None
-                        try:
-                            from urllib.parse import urlparse, parse_qs
-                            parsed = urlparse(url)
-                            query_params = parse_qs(parsed.query)
-                            content_ids = query_params.get('content_id', [])
-                            return content_ids[0] if content_ids else None
-                        except:
-                            return None
-                    
-                    # Determine folder name: if homepage content_id matches any section content_id, use that section's name
-                    homepage_folder_name = "Course Home"
-                    homepage_content_id = get_content_id(homepage_actual_url)
-                    
-                    for section in available_sections_to_scrape:
-                        section_content_id = get_content_id(section["url"])
-                        if homepage_content_id and section_content_id and homepage_content_id == section_content_id:
-                            homepage_folder_name = section["name"]
-                            self.update_status(f"    Course homepage is the same as '{section['name']}' section (content_id: {homepage_content_id}).")
-                            break
-                    
-                    self.update_status(f"    Scraping course homepage to '{homepage_folder_name}' folder...")
-                    content_map_for_homepage = []
-                    
-                    try:
-                        scrape_page_for_content(driver, content_map_for_homepage, self.update_status, current_relative_path=homepage_folder_name)
-                        
-                        if content_map_for_homepage:
-                            self.update_status(f"      Found {len(content_map_for_homepage)} items on course homepage. Processing downloads...")
-                            process_content_list(session, base_course_download_dir, content_map_for_homepage,
-                                               lambda p_val: self.after(0, self.update_progress, p_val),
-                                               self.update_status)
-                        else:
-                            self.update_status("      No downloadable items found on course homepage.")
-                    except Exception as e_homepage:
-                        self.update_status(f"      Error scraping course homepage: {e_homepage}")
-                # --- END HOMEPAGE SCRAPING ---
-
-
-                if not available_sections_to_scrape:
-                    self.update_status(f"    No relevant sections found or accessible for course '{course_name_cleaned}'.")
-                    continue # To the next course
-
-                for section_info in available_sections_to_scrape:
-                    section_name_to_find = section_info["name"]
-                    section_target_url = section_info["url"]
-                    content_map_for_section = [] 
-                    
-                    
-                    
-                    
-                    self.update_status(f"  Processing available section: '{section_name_to_find}'")
-                    
-                    # Check if this section content_id matches the homepage content_id (skip if duplicate)
-                    if homepage_has_content and homepage_content_id:
-                        from urllib.parse import urlparse, parse_qs
-                        try:
-                            parsed = urlparse(section_target_url)
-                            query_params = parse_qs(parsed.query)
-                            section_content_ids = query_params.get('content_id', [])
-                            if section_content_ids and section_content_ids[0] == homepage_content_id:
-                                self.update_status(f"    SKIPPING '{section_name_to_find}' - already scraped as homepage")
-                                continue
-                        except:
-                            pass  # If URL parsing fails, don't skip
-                    
-                    try:
-                        self.update_status(f"    Navigating to section '{section_name_to_find}' via URL: {section_target_url}")
-                        driver.get(section_target_url)
-
-                        try:
-                            # Wait for the content area of the section page to load
-                            # This wait is specific to the section page, so 10-15s is reasonable
-                            WebDriverWait(driver, 10).until( 
-                                EC.presence_of_element_located((By.ID, "content_listContainer"))
-                            )
-                            self.update_status(f"      Section '{section_name_to_find}' content area loaded.")
-                        except TimeoutException:
-                            self.update_status(f"      Timeout: Section '{section_name_to_find}' loaded, but 'content_listContainer' not found. Scraping might be limited or fail.")
-                        
-                        self.update_status(f"      Scanning '{section_name_to_find}' for files and folders...")
-                        clean_section_folder_name = re.sub(r'[\\/*?:"<>|]', "_", section_name_to_find)
-                        
-                        scrape_page_for_content(driver, content_map_for_section, self.update_status, current_relative_path=clean_section_folder_name)
-                        
-                        if content_map_for_section:
-                            self.update_status(f"      Found {len(content_map_for_section)} potential items in '{section_name_to_find}'. Processing downloads...")
-                            process_content_list(session, base_course_download_dir, content_map_for_section, 
-                                                 lambda p_val: self.after(0, self.update_progress, p_val),
-                                                 self.update_status)
-                        else:
-                            self.update_status(f"      No downloadable items or sub-folders found directly in '{section_name_to_find}'.")
-
-                    # Removed Timeout/NoSuchElement here as we pre-filtered available_sections_to_scrape
-                    # These exceptions would now relate to issues on the section page itself (e.g., content_listContainer not appearing)
-                    except Exception as e_section_processing:
-                        self.update_status(f"    - An unexpected error occurred while processing section '{section_name_to_find}': {type(e_section_processing).__name__} - {e_section_processing}")
-                    finally:
-                        # Optional: Navigate back to course main page if worried about state for next section,
-                        # but if sections are independent, this might not be needed and saves a page load.
-                        # For now, let's assume direct navigation to next section's URL is fine.
-                        # If issues arise, add:
-                        # if section_info != available_sections_to_scrape[-1]: # If not the last section
-                        #     self.update_status(f"    Returning to course home before next section...")
-                        #     driver.get(course_main_url)
-                        #     WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, "courseMenuPalette_contents")))
-                        pass
-
-
-                self.update_status(f"--- Finished processing course: {course['name']} ---")
-
-            # ... (rest of the try...except...finally for the entire courses loop) ...
-            self.update_status("\nAll selected courses and their specified sections processed!")
-            messagebox.showinfo("Download Complete", "All selected courses have been processed. Check the status window for details.")
-        except RuntimeError as e: 
-            self.update_status(f"Driver Error during download: {e}")
-            messagebox.showerror("Driver Setup Error", str(e))
-        except Exception as e:
-            self.update_status(f"A critical error occurred during download: {e}")
-            import traceback; self.update_status(traceback.format_exc())
-            messagebox.showerror("Download Error", f"A critical error occurred: {e}. Check status for details.")
+            stats = downloader.stats
+            self.update_status(
+                "\nAll selected courses processed. "
+                f"Files: {stats['files']} saved, {stats['skipped']} skipped, "
+                f"{stats['failed']} failed. Links: {stats['links']}. "
+                f"Documents: {stats['documents']}. "
+                f"Announcements: {stats['announcements']}."
+            )
+            if downloader.failed_courses:
+                self.update_status(
+                    "Courses whose content Blackboard refused (no access):"
+                )
+                for name in downloader.failed_courses:
+                    self.update_status(f"  - {name}")
+            self._show_info(
+                "Download Complete",
+                "All selected courses have been processed. "
+                "Check the status window for details.",
+            )
+        except RuntimeError as exc:
+            self.update_status(f"Driver/Login error: {exc}")
+            self._show_error("Login Error", str(exc))
+        except Exception as exc:  # noqa: BLE001
+            self.update_status(f"A critical error occurred: {exc}")
+            self.update_status(traceback.format_exc())
+            self._show_error("Download Error", f"A critical error occurred: {exc}")
         finally:
-            if driver: 
-                try: driver.quit()
-                except Exception as e_quit: self.update_status(f"Note: Error quitting driver post-download: {e_quit}")
+            if driver:
+                try:
+                    driver.quit()
+                except WebDriverException as exc:
+                    self.update_status(f"Note: error quitting driver: {exc}")
             self.after(0, self.set_ui_state, True)
             self.after(0, self.update_progress, 0)
 
-if __name__ == "__main__":
+
+# =========================================================================== #
+# Headless CLI
+# =========================================================================== #
+
+def build_cli_parser():
+    parser = argparse.ArgumentParser(
+        description="KFUPM Blackboard Ultra Course Downloader"
+    )
+    parser.add_argument("--cli", action="store_true",
+                        help="Run headless in the terminal (no GUI)")
+    parser.add_argument("--list", action="store_true",
+                        help="List matching courses and exit without downloading")
+    parser.add_argument("--term", default=None,
+                        help="Only include courses whose term name contains this text")
+    parser.add_argument("--dest", default=None,
+                        help="Download destination folder")
+    parser.add_argument("--browser", choices=["firefox", "chrome"], default="firefox",
+                        help="Browser to drive for login (default: firefox)")
+    parser.add_argument("--show-browser", action="store_true",
+                        help="Do not run the login browser headless")
+    parser.add_argument("--no-documents", action="store_true",
+                        help="Skip Ultra document pages")
+    parser.add_argument("--no-links", action="store_true",
+                        help="Skip external link shortcuts")
+    parser.add_argument("--no-announcements", action="store_true",
+                        help="Skip announcements")
+    parser.add_argument("--no-syllabus", action="store_true",
+                        help="Skip the syllabus")
+    return parser
+
+
+def run_cli(args):
+    def log(message):
+        print(message, flush=True)
+
+    credentials = load_env_credentials()
+    username = os.environ.get("BB_USERNAME") or credentials.get("username")
+    password = os.environ.get("BB_PASSWORD") or credentials.get("password")
+    if not username or not password:
+        log("ERROR: no credentials found. Add 'User'/'Password' to .env "
+            "or set BB_USERNAME/BB_PASSWORD.")
+        return 2
+
+    dest = args.dest or os.path.join(
+        os.path.expanduser("~"), "KFUPM_Blackboard_Downloads"
+    )
+    os.makedirs(dest, exist_ok=True)
+    log(f"Destination: {dest}")
+
+    driver = None
+    try:
+        driver = setup_driver(args.browser, log, headless=not args.show_browser)
+        cookies = login(driver, username, password, log)
+        client = UltraClient(BASE_URL, cookies, log, driver=driver)
+        courses = list_terms_and_courses(client, log)
+
+        available_terms = sorted({c.get("term", "") for c in courses})
+        log(f"Available terms: {available_terms}")
+
+        if args.term:
+            needle = args.term.lower()
+            courses = [
+                c for c in courses
+                if needle in (c.get("term") or "").lower()
+                or needle == (c.get("term") or "").lower()
+            ]
+            log(f"{len(courses)} course(s) match term '{args.term}'")
+
+        if args.list:
+            for course in courses:
+                print(f"  {course.get('term')} | {course.get('name')} | {course.get('id')}")
+            return 0
+
+        if not courses:
+            log("No courses to download.")
+            return 0
+
+        options = {
+            "documents": not args.no_documents,
+            "links": not args.no_links,
+            "announcements": not args.no_announcements,
+            "syllabus": not args.no_syllabus,
+        }
+        downloader = CourseDownloader(client, driver, log, options)
+
+        for index, course in enumerate(courses, 1):
+            log(f"\n--- ({index}/{len(courses)}) {course.get('name')} "
+                f"[{course.get('term')}] ---")
+            try:
+                downloader.run(course, dest)
+            except UltraAuthError as exc:
+                log(f"  ! Session error, stopping: {exc}")
+                break
+            except Exception as exc:  # noqa: BLE001
+                log(f"  ! Error processing course: {exc}")
+                log(traceback.format_exc())
+
+        stats = downloader.stats
+        log(f"\nDONE. files={stats['files']} skipped={stats['skipped']} "
+            f"failed={stats['failed']} links={stats['links']} "
+            f"documents={stats['documents']} announcements={stats['announcements']}")
+        if downloader.failed_courses:
+            log("Courses whose content Blackboard refused (no access):")
+            for name in downloader.failed_courses:
+                log(f"  - {name}")
+        return 0
+    except RuntimeError as exc:
+        log(f"Driver/Login error: {exc}")
+        return 3
+    except UltraAuthError as exc:
+        log(f"Authentication error: {exc}")
+        return 4
+    except Exception as exc:  # noqa: BLE001
+        log(f"FATAL: {exc}")
+        log(traceback.format_exc())
+        return 1
+    finally:
+        if driver:
+            try:
+                driver.quit()
+            except WebDriverException:
+                pass
+
+
+def main():
+    args = build_cli_parser().parse_args()
+    if args.cli or args.list:
+        sys.exit(run_cli(args))
     app = App()
     app.mainloop()
+
+
+if __name__ == "__main__":
+    main()

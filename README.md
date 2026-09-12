@@ -1,123 +1,162 @@
-# KFUPM Blackboard Course Downloader
-# Currently NOT working on the new Blackboard Ultra.
+# KFUPM Blackboard Ultra Course Downloader
 
----
-<h2 align="center">Downloads | التحميل</h2>
+A tool to locally back up entire KFUPM Blackboard **Ultra** courses with a single
+click. It logs into Blackboard through KFUPM Single Sign-On, reads every course
+through the Blackboard Learn REST API, and saves all materials to your computer
+while preserving the original folder structure.
 
-<div align="center">
-  <a href="https://github.com/bibo242/Blackboard-course-downloader/releases/tag/v1.2" title="Download Latest Release (.exe)">
-    <img src="https://img.shields.io/badge/DOWNLOAD%20LATEST%20RELEASE%20(.EXE)-brightgreen?style=for-the-badge&logo=windows&logoColor=white" alt="Download Latest Release (.exe)">
-  </a>
-  <p align="center"><small><em>(Note: Windows might show a "Windows protected your PC" security warning. Click "More info" and then "Run anyway".)</em></small></p>
-  <p align="center"><small><em>This happens because the app isn't yet code-signed (a process that verifies the publisher).</em></small></p>
-  <p align="center">⭐ <small>If you find this project helpful, please consider starring it on GitHub! Your support is appreciated. ⭐</small></p>
-  <p align="center"><small> View all versions on the <a href="https://github.com/bibo242/Blackboard-course-downloader/releases/latest">Releases Page</a>.</small></p>
-</div>
-
----
-<br>
-
-
-
-
-
-
-
-
-The KFUPM Blackboard Course Downloader is a user-friendly desktop application designed to access your KFUPM Blackboard page and download entire course materials. It works by scraping the Blackboard website, saving you the tedious task of manually clicking and downloading every file.
-
-This tool is perfect for backing up course materials, whether you want to revise from them later or archive them for future students to utilize. It preserves the original folder structure from Blackboard, ensuring everything is perfectly organized.
-
-_Note: it will probably work for you if you're from another university that uses Blackboard but you have to change the URL in the code_
-
- 
-<img width="697" height="1024" alt="blackboard_downloader_ui" src="https://github.com/user-attachments/assets/ff227620-9703-4d13-a9a8-a455e2988e2d" />
-
-
-![Screenshot from 2025-06-18 15-34-27](https://github.com/user-attachments/assets/a8b1a615-a89e-4943-8b7d-3f867cc6eafd)
-
+> This is the Ultra version. The original project targeted Blackboard Classic,
+> which no longer matches KFUPM's current Blackboard.
 
 ---
 
-##  Features
+## Features
 
-- **Easy-to-Use GUI:** A simple graphical interface that requires no command-line knowledge.
-- **Bulk Downloading:** Download all materials for one course, multiple courses, or even entire terms at once.
-- **Preserves Structure:** Replicates the exact folder hierarchy from Blackboard on your computer.
-- **Comprehensive Scraper:** Downloads all file types (PDF, PPT, DOCX, ZIP, etc.) and also saves external web links as `.url` shortcuts.
-- **Browser Choice:** Supports both Google Chrome and Mozilla Firefox.
-- **Headless Mode:** An option to run the browser invisibly in the background for a cleaner experience.
-- **Standalone Application:** No need to install Python or any dependencies if you use the `.exe` file.
+- **Easy-to-use GUI:** no command-line knowledge required.
+- **Bulk downloading:** one course, several courses, or entire terms at once.
+- **Preserves structure:** replicates the exact Ultra outline folder hierarchy.
+- **All file types:** PDF, PPT, DOCX, ZIP, videos, images, and more.
+- **External web links:** saved as `.url` shortcuts.
+- **Ultra documents:** saved as `.html` (with embedded files downloaded too).
+- **Assignments & tests:** saved as `.url` shortcuts plus any attachments.
+- **Announcements:** saved as `.html` with attachments.
+- **Syllabus:** saved when the course exposes one.
+- **Browser choice:** Google Chrome or Mozilla Firefox.
+- **Headless mode:** run the login browser invisibly in the background.
+- **Incremental:** already-downloaded files are skipped.
+- **Standalone application:** the release `.exe` needs no Python installation.
 
 ---
 
-##  How to Use the Application (`.exe`)
+## How it works
 
-This is the recommended method for most users. No installation is required!
+1. **Login** is performed in a real browser (Selenium) so KFUPM's SAML Single
+   Sign-On (`login.kfupm.edu.sa`, WSO2 Identity Server) works exactly as it does
+   manually. Your credentials are entered into the SSO page; they are not sent
+   anywhere else.
+2. **Course data** is read with the Blackboard Learn REST API
+   (`/learn/api/public/v1/...`) using the session cookies from that browser.
+   This is much faster and more reliable than scraping Ultra's rendered pages.
+3. **Files** are streamed to disk from the attachment endpoints, and `.url`
+   shortcuts are written for external links.
 
-1.  **Download the latest release.**
-    - Go to the [**Releases Page**](https://github.com/bibo242/Blackboard-course-downloader/releases).
-    - Under the latest version, download the `course_downloader.exe` file from the "Assets" section.
+---
 
-2.  **Run the application.**
-    - Double-click the downloaded `course_downloader.exe` file to launch the program.
-    - _(Note: Windows might show a "Windows protected your PC" security warning. Click "More info" and then "Run anyway".)_
+## How to use the application (`.exe`)
 
-3.  **Log in and Scan.**
-    - Enter your KFUPM username and password.
-    - Choose your preferred browser (Chrome or Firefox).
-    - Click **"Scan Courses"**. The application will log in and find all your courses, displaying them in the listbox.
+1. Download the latest release and run `course_downloader.exe`.
+   *(Windows may warn that the app is unsigned — click "More info" then "Run anyway".)*
+2. Enter your KFUPM username and password.
+3. Choose your browser (Chrome or Firefox) and whether to run headless.
+4. Choose what to download (documents, links, announcements, syllabus).
+5. Click **Scan Courses**.
+6. Select the course(s) you want, choose a destination folder, and click
+   **Download Selected Course(s)**.
 
-4.  **Download.**
-    - Select the course(s) you want to download from the list.
-    - Choose a download destination folder.
-    - Click **"Download Selected Course(s)"** and watch the magic happen!
+### System requirements
 
-### System Requirements
 - An active internet connection.
-- [Google Chrome](https://www.google.com/chrome/) or [Mozilla Firefox](https://www.mozilla.org/firefox/) must be installed on your system.
-- Your terms that you want to download must be set to "Show Term" on the Blackboard website ![image](https://github.com/user-attachments/assets/5f7500af-da33-4562-83a8-655798b69890)
-
-
----
-
-##  How to Run from Source (`.py` file)
-
-This method is for developers who want to run the Python script directly.
-
-1.  **Clone the repository.**
-    Open your terminal or Git Bash and run:
-    ```bash
-    git clone https://github.com/bibo242/Blackboard-course-downloader.git
-    ```
-
-2.  **Navigate to the project folder.**
-    ```bash
-    cd Blackboard-course-downloader
-    ```
-
-3.  **(Optional but Recommended) Create and activate a virtual environment.**
-    ```bash
-    # Create the environment
-    python -m venv venv
-    # Activate it (on Windows)
-    .\venv\Scripts\activate
-    ```
-
-4.  **Install the required packages.**
-    The `requirements.txt` file contains all the necessary libraries.
-    ```bash
-    pip install -r requirements.txt
-    ```
-
-5.  **Run the script.**
-    ```bash
-    python course_downloader.py
-    ```
-    The application GUI will launch, and you can proceed as described in the user guide above.
+- [Google Chrome](https://www.google.com/chrome/) or
+  [Mozilla Firefox](https://www.mozilla.org/firefox/) installed.
+  (Firefox also requires `geckodriver` to be on your `PATH`.)
 
 ---
 
-##  Disclaimer
+## Credentials via `.env`
 
-This tool is provided for educational and personal use only. The user is solely responsible for complying with all terms of service of King Fahd University of Petroleum & Minerals (KFUPM) and Blackboard. Your KFUPM credentials are used locally to log into Blackboard and are not stored or transmitted elsewhere.
+Instead of typing your username and password every time, you can create a
+`.env` file next to `course_downloader.py`:
+
+```dotenv
+User = 202012345
+Password = your-password
+```
+
+Accepted key names (case-insensitive): `User`, `Username`, `BB_USERNAME`,
+`KFUPM_USERNAME` and `Password`, `Pass`, `BB_PASSWORD`, `KFUPM_PASSWORD`.
+Spaces around `=` and surrounding quotes are ignored. The app fills the fields
+from `.env` on startup, and keeps those credentials out of `config.ini`.
+
+> `.env` is listed in `.gitignore`, so it is never committed. Never share it.
+
+---
+
+## How to run from source
+
+```bash
+git clone https://github.com/bibo242/Blackboard-course-downloader.git
+cd Blackboard-course-downloader
+
+python -m venv venv
+# Windows:
+venv\Scripts\activate
+# Linux/macOS:
+source venv/bin/activate
+
+pip install -r requirements.txt
+python course_downloader.py
+```
+
+### Running the tests
+
+The unit tests are fully offline (no Blackboard account needed):
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+---
+
+## Output structure
+
+```
+<Download To>/
+└── <Term>/
+    └── <Course Name>/
+        ├── <Folder>/
+        │   ├── lecture.pdf
+        │   └── notes.docx
+        ├── Some Document.html
+        ├── External Link.url
+        ├── Assignment.url
+        └── Announcements/
+            └── 2026-01-15_Welcome.html
+```
+
+---
+
+## Building a standalone `.exe`
+
+```bash
+pip install pyinstaller
+pyinstaller --noconfirm --onefile --windowed --icon icon.ico \
+    --collect-all customtkinter \
+    --name course_downloader course_downloader.py
+```
+
+---
+
+## Notes and limitations
+
+- **SSO:** If KFUPM ever enables multi-factor authentication, headless login
+  cannot complete the second factor automatically. In that case uncheck
+  **Headless Mode** and finish the prompt in the browser window.
+- **Read-only:** the tool never modifies anything on Blackboard.
+- **Assignments/tests:** student submissions are not downloaded (Blackboard does
+  not expose them for this use case); the tool saves a link to the item and any
+  instructor attachments.
+- **Syllabus:** saved on a best-effort basis because Ultra tenants expose it
+  differently.
+
+---
+
+## Disclaimer
+
+This tool is provided for educational and personal use only. The user is solely
+responsible for complying with all terms of service of King Fahd University of
+Petroleum & Minerals (KFUPM) and Blackboard. Your KFUPM credentials are used
+locally to log into Blackboard and are not stored or transmitted elsewhere.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
