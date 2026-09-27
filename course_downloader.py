@@ -668,8 +668,17 @@ class UltraClient:
             payload = self.get(next_ref, params=next_params)
             if not payload:
                 break
-            collected.extend(payload.get("results") or [])
-            next_ref = (payload.get("paging") or {}).get("nextPage")
+            if isinstance(payload, dict):
+                results = payload.get("results")
+                if isinstance(results, list):
+                    collected.extend(results)
+                paging = payload.get("paging")
+                next_ref = paging.get("nextPage") if isinstance(paging, dict) else None
+            elif isinstance(payload, list):
+                collected.extend(payload)
+                next_ref = None
+            else:
+                break
             next_params = None
         return collected
 
@@ -754,6 +763,8 @@ def list_terms_and_courses(client, status_callback):
     skipped = 0
 
     for membership in memberships:
+        if not isinstance(membership, dict):
+            continue
         course_id = membership.get("courseId")
         if not course_id or course_id in seen_ids:
             continue
@@ -917,58 +928,78 @@ class CourseDownloader:
     # ------------------------------------------------------------ tree walk
     def _walk(self, course_id, folder_id, dir_path, depth):
         if folder_id is None:
-            path = f"{API_ROOT}/courses/{course_id}/contents"
+            path = f"{API_ROOT}/courses/{course_id}/contents/ROOT/children"
+            params = {"@view": "Summary", "expand": "gradebookCategory"}
         else:
             path = f"{API_ROOT}/courses/{course_id}/contents/{folder_id}/children"
+            params = {"@view": "Summary", "expand": "gradebookCategory"}
 
         try:
-            items = self.client.get_all(path)
+            items = self.client.get_all(path, params=params)
         except UltraError as exc:
             self.status(f"{'  ' * depth}! Could not read contents: {exc}")
             if depth == 0:
                 self._root_failed = True
             return
 
+        items = [i for i in items if isinstance(i, dict)]
         items.sort(key=lambda item: (item.get("position") or 0, item.get("title") or ""))
 
         for item in items:
-            content_id = item.get("id")
-            if not content_id:
-                continue
-            handler = ((item.get("contentHandler") or {}).get("id") or "").strip()
-            title = (item.get("title") or content_id).strip()
-            kind = kind_for_handler(handler, item)
+            try:
+                if not isinstance(item, dict):
+                    self.status(
+                        f"{'  ' * depth}- Skipped malformed item: {type(item).__name__}"
+                    )
+                    continue
+                content_id = item.get("id")
+                if not content_id:
+                    continue
+                handler_obj = item.get("contentHandler")
+                if not isinstance(handler_obj, dict):
+                    handler_obj = {}
+                handler = (handler_obj.get("id") or "").strip()
+                title = (item.get("title") or content_id).strip()
+                kind = kind_for_handler(handler, item)
 
-            if kind == "folder":
-                sub_dir = os.path.join(
-                    dir_path, self._alloc(dir_path, sanitize_component(title))
-                )
-                os.makedirs(sub_dir, exist_ok=True)
-                self.status(f"{'  ' * depth}+ Folder: {title}")
-                self._walk(course_id, content_id, sub_dir, depth + 1)
+                if kind == "folder":
+                    sub_dir = os.path.join(
+                        dir_path, self._alloc(dir_path, sanitize_component(title))
+                    )
+                    os.makedirs(sub_dir, exist_ok=True)
+                    self.status(f"{'  ' * depth}+ Folder: {title}")
+                    try:
+                        self._walk(course_id, content_id, sub_dir, depth + 1)
+                    except Exception as exc:  # noqa: BLE001 - one bad folder must not abort the course
+                        self.status(
+                            f"{'  ' * depth}! Could not read children of '{title}': {exc}"
+                        )
 
-            elif kind == "file":
-                self._handle_file(course_id, item, title, dir_path)
+                elif kind == "file":
+                    self._handle_file(course_id, item, title, dir_path)
 
-            elif kind == "document":
-                if "syllabus" in handler or title.lower().startswith("syllabus"):
-                    self._syllabus_seen = True
-                if self.options.get("documents", True):
-                    self._handle_document(course_id, item, title, dir_path)
+                elif kind == "document":
+                    if "syllabus" in handler or title.lower().startswith("syllabus"):
+                        self._syllabus_seen = True
+                    if self.options.get("documents", True):
+                        self._handle_document(course_id, item, title, dir_path)
+                    else:
+                        self.status(f"{'  ' * depth}- Document skipped: {title}")
+
+                elif kind == "link":
+                    if self.options.get("links", True):
+                        self._handle_link(item, title, dir_path)
+                    else:
+                        self.status(f"{'  ' * depth}- Link skipped: {title}")
+
+                elif kind == "assessment":
+                    self._handle_assessment(course_id, item, title, dir_path)
+
                 else:
-                    self.status(f"{'  ' * depth}- Document skipped: {title}")
-
-            elif kind == "link":
-                if self.options.get("links", True):
-                    self._handle_link(item, title, dir_path)
-                else:
-                    self.status(f"{'  ' * depth}- Link skipped: {title}")
-
-            elif kind == "assessment":
-                self._handle_assessment(course_id, item, title, dir_path)
-
-            else:
-                self._handle_other(course_id, item, title, dir_path)
+                    self._handle_other(course_id, item, title, dir_path)
+            except Exception as exc:  # noqa: BLE001 - one bad item must not abort the course
+                label = item.get("title", item.get("id", "?")) if isinstance(item, dict) else "?"
+                self.status(f"{'  ' * depth}! Error processing item '{label}': {exc}")
 
     # ------------------------------------------------------------- handlers
     def _handle_file(self, course_id, item, title, dir_path):
@@ -1007,7 +1038,9 @@ class CourseDownloader:
             self.status(f"          FAILED document {filename}: {exc}")
 
     def _handle_link(self, item, title, dir_path):
-        handler = item.get("contentHandler") or {}
+        handler = item.get("contentHandler")
+        if not isinstance(handler, dict):
+            handler = {}
         url = (
             handler.get("url")
             or handler.get("href")
@@ -1016,7 +1049,7 @@ class CourseDownloader:
         )
         if not url:
             for link in item.get("links") or []:
-                if link.get("href"):
+                if isinstance(link, dict) and link.get("href"):
                     url = link["href"]
                     break
         if url:
@@ -1033,7 +1066,7 @@ class CourseDownloader:
     def _handle_other(self, course_id, item, title, dir_path):
         url = None
         for link in item.get("links") or []:
-            if link.get("href"):
+            if isinstance(link, dict) and link.get("href"):
                 url = link["href"]
                 break
         if url and url.startswith("/"):
@@ -1128,11 +1161,14 @@ class CourseDownloader:
     # -------------------------------------------------------- announcements
     def _download_announcements(self, course_id, course_dir):
         announcements = self.client.get_all(
-            f"{API_ROOT}/courses/{course_id}/announcements"
+            f"{API_ROOT}/courses/{course_id}/announcements",
+            params={"sort": "startDateRestriction(desc)"},
         )
         if not announcements:
             self.status("    No announcements found.")
             return
+
+        announcements = [a for a in announcements if isinstance(a, dict)]
 
         out_dir = os.path.join(course_dir, "Announcements")
         os.makedirs(out_dir, exist_ok=True)
@@ -1141,26 +1177,31 @@ class CourseDownloader:
         announcements.sort(key=lambda a: (a.get("created") or "", a.get("id") or ""))
 
         for announcement in announcements:
-            title = (announcement.get("title") or "announcement").strip()
-            created = (announcement.get("created") or "")[:10]
-            body = announcement.get("body") or ""
-            if body:
-                link_map = self._download_embeds(course_id, out_dir, title, body)
-                for original, local in link_map.items():
-                    body = body.replace(original, local)
-
-            base_name = sanitize_component(
-                f"{created}_{title}".strip("_"), fallback="announcement"
-            )
-            filename = self._alloc(out_dir, base_name + ".html")
-            path = os.path.join(out_dir, filename)
             try:
-                with open(path, "w", encoding="utf-8") as handle:
-                    handle.write(html_document(title, body))
-                self.stats["announcements"] += 1
-                self.status(f"        ANNOUNCEMENT: {filename}")
-            except OSError as exc:
-                self.status(f"        FAILED announcement {filename}: {exc}")
+                if not isinstance(announcement, dict):
+                    continue
+                title = (announcement.get("title") or "announcement").strip()
+                created = (announcement.get("created") or "")[:10]
+                body = announcement.get("body") or ""
+                if isinstance(body, str) and body:
+                    link_map = self._download_embeds(course_id, out_dir, title, body)
+                    for original, local in link_map.items():
+                        body = body.replace(original, local)
+
+                base_name = sanitize_component(
+                    f"{created}_{title}".strip("_"), fallback="announcement"
+                )
+                filename = self._alloc(out_dir, base_name + ".html")
+                path = os.path.join(out_dir, filename)
+                try:
+                    with open(path, "w", encoding="utf-8") as handle:
+                        handle.write(html_document(title, body))
+                    self.stats["announcements"] += 1
+                    self.status(f"        ANNOUNCEMENT: {filename}")
+                except OSError as exc:
+                    self.status(f"        FAILED announcement {filename}: {exc}")
+            except Exception as exc:  # noqa: BLE001 - one bad announcement must not abort the rest
+                self.status(f"        ! Error processing announcement: {exc}")
 
     # -------------------------------------------------------------- syllabus
     def _try_syllabus(self, course_id, course_dir):
