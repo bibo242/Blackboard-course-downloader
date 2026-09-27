@@ -60,7 +60,12 @@ from webdriver_manager.chrome import ChromeDriverManager
 
 BASE_URL = "https://blackboard.kfupm.edu.sa/"
 ULTRA_HOME = BASE_URL + "ultra/"
-API_ROOT = "/learn/api/public/v1"
+# The internal Ultra API (/learn/api/v1) is what the Ultra web UI itself calls and
+# returns the complete result set. The public REST API (/learn/api/public/v1)
+# silently filters out announcements/content whose availability window has not
+# opened yet, so we only fall back to it when the internal API is unreachable.
+API_ROOT = "/learn/api/v1"
+PUBLIC_API_ROOT = "/learn/api/public/v1"
 
 CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".kfupm_bb_downloader")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.ini")
@@ -554,6 +559,29 @@ class UltraClient:
         except ValueError:
             return None
 
+    def _get_via_public_api(self, path, params=None):
+        """Retry a request against the public REST API.
+
+        The internal Ultra API sometimes hides announcements/content whose
+        availability window has not opened yet. The public API may still serve
+        them, so we fall back to it when the internal API returns 403/404.
+        """
+        public_path = PUBLIC_API_ROOT + path[len(API_ROOT):]
+        url = self._url(public_path)
+        try:
+            response = self.session.get(
+                url, params=params, timeout=self.timeout,
+                headers={"Accept": "application/json"},
+            )
+        except requests.RequestException:
+            return None
+        if response.status_code == 200:
+            try:
+                return response.json()
+            except ValueError:
+                return None
+        return None
+
     def get(self, path, params=None, retries=3, allow_404=False):
         url = self._url(path)
         delay = 1.5
@@ -577,6 +605,11 @@ class UltraClient:
                     return response.json()
                 except ValueError as exc:
                     raise UltraError(f"GET {url} did not return JSON: {exc}")
+            # Fall back to the public API when the internal API hides content.
+            if response.status_code in (403, 404):
+                fallback = self._get_via_public_api(path, params)
+                if fallback is not None:
+                    return fallback
             if response.status_code == 404 and allow_404:
                 return None
             if response.status_code in (401, 403):
