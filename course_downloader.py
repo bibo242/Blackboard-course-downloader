@@ -244,13 +244,69 @@ def load_env_credentials():
 # Selenium driver + SSO login
 # =========================================================================== #
 
+def _sanitize_child_env():
+    """Strip PyInstaller's bundle dir from the library search path.
+
+    PyInstaller prepends its extraction directory to LD_LIBRARY_PATH (and the
+    DYLD equivalent on macOS). That variable is inherited by every child process,
+    so Firefox/Chrome/ChromeDriver end up loading the bundle's bundled libraries
+    instead of the system ones and crash (e.g. pango/fontconfig symbol errors,
+    "Process unexpectedly closed with status 255"). Removing the bundle dir for
+    child processes makes external browsers use the system libraries they expect.
+    """
+    if not getattr(sys, "frozen", False):
+        return
+    bundle_dir = getattr(sys, "_MEIPASS", None)
+    if not bundle_dir:
+        return
+    bundle_real = os.path.realpath(bundle_dir)
+    for var in ("LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"):
+        value = os.environ.get(var)
+        if not value:
+            continue
+        kept = [
+            part
+            for part in value.split(os.pathsep)
+            if part and os.path.realpath(part) != bundle_real
+        ]
+        os.environ[var] = os.pathsep.join(kept)
+
+
+def _find_firefox_binary():
+    """Locate an installed Firefox, if any, so geckodriver uses it directly."""
+    candidates = [os.environ.get("FIREFOX_BINARY"), shutil.which("firefox")]
+    if sys.platform == "darwin":
+        candidates.append("/Applications/Firefox.app/Contents/MacOS/firefox")
+    if sys.platform == "win32":
+        candidates += [
+            r"C:\Program Files\Mozilla Firefox\firefox.exe",
+            r"C:\Program Files (x86)\Mozilla Firefox\firefox.exe",
+        ]
+    else:
+        candidates += [
+            "/usr/bin/firefox",
+            "/usr/local/bin/firefox",
+            "/snap/bin/firefox",
+            "/opt/homebrew/bin/firefox",
+        ]
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate):
+            return candidate
+    return None
+
+
 def setup_driver(browser_choice, status_callback, headless=True):
     """Create a Selenium WebDriver for the requested browser."""
+    _sanitize_child_env()
     if browser_choice == "firefox":
         status_callback("Initializing Firefox driver...")
         options = FirefoxOptions()
         if headless:
             options.add_argument("-headless")
+        firefox_path = _find_firefox_binary()
+        if firefox_path:
+            options.binary_location = firefox_path
+            status_callback(f"  - using Firefox at {firefox_path}")
         geckodriver_path = os.environ.get("GECKODRIVER") or shutil.which("geckodriver")
         if not geckodriver_path:
             for candidate in (
