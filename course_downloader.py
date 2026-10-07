@@ -60,12 +60,7 @@ from webdriver_manager.chrome import ChromeDriverManager
 
 BASE_URL = "https://blackboard.kfupm.edu.sa/"
 ULTRA_HOME = BASE_URL + "ultra/"
-# The internal Ultra API (/learn/api/v1) is what the Ultra web UI itself calls and
-# returns the complete result set. The public REST API (/learn/api/public/v1)
-# silently filters out announcements/content whose availability window has not
-# opened yet, so we only fall back to it when the internal API is unreachable.
-API_ROOT = "/learn/api/v1"
-PUBLIC_API_ROOT = "/learn/api/public/v1"
+API_ROOT = "/learn/api/public/v1"
 
 CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".kfupm_bb_downloader")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.ini")
@@ -137,37 +132,8 @@ def sanitize_component(name, fallback="untitled", max_len=180):
     return name[:max_len]
 
 
-def coerce_body_html(body):
-    """Normalise an Ultra content body to an HTML string.
-
-    The internal Ultra API returns some bodies as plain HTML strings but others
-    as structured objects, e.g. ``{'rawText': '<p>...</p>', 'webLocation': ...}``.
-    Passing such an object straight to ``html_document`` writes a Python dict
-    repr into the file, and the embedded-file scan (regex over a string) would
-    raise or silently miss everything.
-    """
-    if body is None:
-        return ""
-    if isinstance(body, str):
-        return body
-    if isinstance(body, dict):
-        for key in ("rawText", "rawHtml", "html", "text", "body", "value"):
-            value = body.get(key)
-            if isinstance(value, str) and value.strip():
-                return value
-        return "\n".join(
-            coerce_body_html(value)
-            for value in body.values()
-            if isinstance(value, (str, dict, list, tuple))
-        )
-    if isinstance(body, (list, tuple)):
-        return "\n".join(coerce_body_html(item) for item in body)
-    return str(body)
-
-
 def extract_bbcswebdav_urls(body):
     """Return unique /bbcswebdav/ URLs referenced by an Ultra body (BBML/HTML)."""
-    body = coerce_body_html(body)
     if not body:
         return []
     found = _BBCSWEBDav_RE.findall(body)
@@ -278,10 +244,10 @@ def _sanitize_child_env():
 
     PyInstaller prepends its extraction directory to LD_LIBRARY_PATH (and the
     DYLD equivalent on macOS). That variable is inherited by every child process,
-    so Firefox/Chrome/ChromeDriver end up loading the bundle's bundled libraries
-    instead of the system ones and crash (e.g. pango/fontconfig symbol errors,
-    "Process unexpectedly closed with status 255"). Removing the bundle dir for
-    child processes makes external browsers use the system libraries they expect.
+    so Firefox/Chrome/ChromeDriver load the bundle's libraries instead of the
+    system ones and crash with "Process unexpectedly closed with status 255".
+    Removing the bundle dir for child processes makes external browsers use the
+    system libraries they expect.
     """
     if not getattr(sys, "frozen", False):
         return
@@ -645,29 +611,6 @@ class UltraClient:
         except ValueError:
             return None
 
-    def _get_via_public_api(self, path, params=None):
-        """Retry a request against the public REST API.
-
-        The internal Ultra API sometimes hides announcements/content whose
-        availability window has not opened yet. The public API may still serve
-        them, so we fall back to it when the internal API returns 403/404.
-        """
-        public_path = PUBLIC_API_ROOT + path[len(API_ROOT):]
-        url = self._url(public_path)
-        try:
-            response = self.session.get(
-                url, params=params, timeout=self.timeout,
-                headers={"Accept": "application/json"},
-            )
-        except requests.RequestException:
-            return None
-        if response.status_code == 200:
-            try:
-                return response.json()
-            except ValueError:
-                return None
-        return None
-
     def get(self, path, params=None, retries=3, allow_404=False):
         url = self._url(path)
         delay = 1.5
@@ -691,11 +634,6 @@ class UltraClient:
                     return response.json()
                 except ValueError as exc:
                     raise UltraError(f"GET {url} did not return JSON: {exc}")
-            # Fall back to the public API when the internal API hides content.
-            if response.status_code in (403, 404):
-                fallback = self._get_via_public_api(path, params)
-                if fallback is not None:
-                    return fallback
             if response.status_code == 404 and allow_404:
                 return None
             if response.status_code in (401, 403):
@@ -754,17 +692,8 @@ class UltraClient:
             payload = self.get(next_ref, params=next_params)
             if not payload:
                 break
-            if isinstance(payload, dict):
-                results = payload.get("results")
-                if isinstance(results, list):
-                    collected.extend(results)
-                paging = payload.get("paging")
-                next_ref = paging.get("nextPage") if isinstance(paging, dict) else None
-            elif isinstance(payload, list):
-                collected.extend(payload)
-                next_ref = None
-            else:
-                break
+            collected.extend(payload.get("results") or [])
+            next_ref = (payload.get("paging") or {}).get("nextPage")
             next_params = None
         return collected
 
@@ -849,8 +778,6 @@ def list_terms_and_courses(client, status_callback):
     skipped = 0
 
     for membership in memberships:
-        if not isinstance(membership, dict):
-            continue
         course_id = membership.get("courseId")
         if not course_id or course_id in seen_ids:
             continue
@@ -1014,78 +941,58 @@ class CourseDownloader:
     # ------------------------------------------------------------ tree walk
     def _walk(self, course_id, folder_id, dir_path, depth):
         if folder_id is None:
-            path = f"{API_ROOT}/courses/{course_id}/contents/ROOT/children"
-            params = {"@view": "Summary", "expand": "gradebookCategory"}
+            path = f"{API_ROOT}/courses/{course_id}/contents"
         else:
             path = f"{API_ROOT}/courses/{course_id}/contents/{folder_id}/children"
-            params = {"@view": "Summary", "expand": "gradebookCategory"}
 
         try:
-            items = self.client.get_all(path, params=params)
+            items = self.client.get_all(path)
         except UltraError as exc:
             self.status(f"{'  ' * depth}! Could not read contents: {exc}")
             if depth == 0:
                 self._root_failed = True
             return
 
-        items = [i for i in items if isinstance(i, dict)]
         items.sort(key=lambda item: (item.get("position") or 0, item.get("title") or ""))
 
         for item in items:
-            try:
-                if not isinstance(item, dict):
-                    self.status(
-                        f"{'  ' * depth}- Skipped malformed item: {type(item).__name__}"
-                    )
-                    continue
-                content_id = item.get("id")
-                if not content_id:
-                    continue
-                handler_obj = item.get("contentHandler")
-                if not isinstance(handler_obj, dict):
-                    handler_obj = {}
-                handler = (handler_obj.get("id") or "").strip()
-                title = (item.get("title") or content_id).strip()
-                kind = kind_for_handler(handler, item)
+            content_id = item.get("id")
+            if not content_id:
+                continue
+            handler = ((item.get("contentHandler") or {}).get("id") or "").strip()
+            title = (item.get("title") or content_id).strip()
+            kind = kind_for_handler(handler, item)
 
-                if kind == "folder":
-                    sub_dir = os.path.join(
-                        dir_path, self._alloc(dir_path, sanitize_component(title))
-                    )
-                    os.makedirs(sub_dir, exist_ok=True)
-                    self.status(f"{'  ' * depth}+ Folder: {title}")
-                    try:
-                        self._walk(course_id, content_id, sub_dir, depth + 1)
-                    except Exception as exc:  # noqa: BLE001 - one bad folder must not abort the course
-                        self.status(
-                            f"{'  ' * depth}! Could not read children of '{title}': {exc}"
-                        )
+            if kind == "folder":
+                sub_dir = os.path.join(
+                    dir_path, self._alloc(dir_path, sanitize_component(title))
+                )
+                os.makedirs(sub_dir, exist_ok=True)
+                self.status(f"{'  ' * depth}+ Folder: {title}")
+                self._walk(course_id, content_id, sub_dir, depth + 1)
 
-                elif kind == "file":
-                    self._handle_file(course_id, item, title, dir_path)
+            elif kind == "file":
+                self._handle_file(course_id, item, title, dir_path)
 
-                elif kind == "document":
-                    if "syllabus" in handler or title.lower().startswith("syllabus"):
-                        self._syllabus_seen = True
-                    if self.options.get("documents", True):
-                        self._handle_document(course_id, item, title, dir_path)
-                    else:
-                        self.status(f"{'  ' * depth}- Document skipped: {title}")
-
-                elif kind == "link":
-                    if self.options.get("links", True):
-                        self._handle_link(item, title, dir_path)
-                    else:
-                        self.status(f"{'  ' * depth}- Link skipped: {title}")
-
-                elif kind == "assessment":
-                    self._handle_assessment(course_id, item, title, dir_path)
-
+            elif kind == "document":
+                if "syllabus" in handler or title.lower().startswith("syllabus"):
+                    self._syllabus_seen = True
+                if self.options.get("documents", True):
+                    self._handle_document(course_id, item, title, dir_path)
                 else:
-                    self._handle_other(course_id, item, title, dir_path)
-            except Exception as exc:  # noqa: BLE001 - one bad item must not abort the course
-                label = item.get("title", item.get("id", "?")) if isinstance(item, dict) else "?"
-                self.status(f"{'  ' * depth}! Error processing item '{label}': {exc}")
+                    self.status(f"{'  ' * depth}- Document skipped: {title}")
+
+            elif kind == "link":
+                if self.options.get("links", True):
+                    self._handle_link(item, title, dir_path)
+                else:
+                    self.status(f"{'  ' * depth}- Link skipped: {title}")
+
+            elif kind == "assessment":
+                self._handle_assessment(course_id, item, title, dir_path)
+
+            else:
+                self._handle_other(course_id, item, title, dir_path)
 
     # ------------------------------------------------------------- handlers
     def _handle_file(self, course_id, item, title, dir_path):
@@ -1102,7 +1009,7 @@ class CourseDownloader:
 
     def _handle_document(self, course_id, item, title, dir_path):
         self.status(f"        Document: {title}")
-        body = coerce_body_html(item.get("body"))
+        body = item.get("body") or ""
         if body:
             link_map = self._download_embeds(course_id, dir_path, title, body)
             for original, local in link_map.items():
@@ -1124,9 +1031,7 @@ class CourseDownloader:
             self.status(f"          FAILED document {filename}: {exc}")
 
     def _handle_link(self, item, title, dir_path):
-        handler = item.get("contentHandler")
-        if not isinstance(handler, dict):
-            handler = {}
+        handler = item.get("contentHandler") or {}
         url = (
             handler.get("url")
             or handler.get("href")
@@ -1135,7 +1040,7 @@ class CourseDownloader:
         )
         if not url:
             for link in item.get("links") or []:
-                if isinstance(link, dict) and link.get("href"):
+                if link.get("href"):
                     url = link["href"]
                     break
         if url:
@@ -1152,7 +1057,7 @@ class CourseDownloader:
     def _handle_other(self, course_id, item, title, dir_path):
         url = None
         for link in item.get("links") or []:
-            if isinstance(link, dict) and link.get("href"):
+            if link.get("href"):
                 url = link["href"]
                 break
         if url and url.startswith("/"):
@@ -1247,14 +1152,11 @@ class CourseDownloader:
     # -------------------------------------------------------- announcements
     def _download_announcements(self, course_id, course_dir):
         announcements = self.client.get_all(
-            f"{API_ROOT}/courses/{course_id}/announcements",
-            params={"sort": "startDateRestriction(desc)"},
+            f"{API_ROOT}/courses/{course_id}/announcements"
         )
         if not announcements:
             self.status("    No announcements found.")
             return
-
-        announcements = [a for a in announcements if isinstance(a, dict)]
 
         out_dir = os.path.join(course_dir, "Announcements")
         os.makedirs(out_dir, exist_ok=True)
@@ -1263,31 +1165,26 @@ class CourseDownloader:
         announcements.sort(key=lambda a: (a.get("created") or "", a.get("id") or ""))
 
         for announcement in announcements:
-            try:
-                if not isinstance(announcement, dict):
-                    continue
-                title = (announcement.get("title") or "announcement").strip()
-                created = (announcement.get("created") or "")[:10]
-                body = coerce_body_html(announcement.get("body"))
-                if body:
-                    link_map = self._download_embeds(course_id, out_dir, title, body)
-                    for original, local in link_map.items():
-                        body = body.replace(original, local)
+            title = (announcement.get("title") or "announcement").strip()
+            created = (announcement.get("created") or "")[:10]
+            body = announcement.get("body") or ""
+            if body:
+                link_map = self._download_embeds(course_id, out_dir, title, body)
+                for original, local in link_map.items():
+                    body = body.replace(original, local)
 
-                base_name = sanitize_component(
-                    f"{created}_{title}".strip("_"), fallback="announcement"
-                )
-                filename = self._alloc(out_dir, base_name + ".html")
-                path = os.path.join(out_dir, filename)
-                try:
-                    with open(path, "w", encoding="utf-8") as handle:
-                        handle.write(html_document(title, body))
-                    self.stats["announcements"] += 1
-                    self.status(f"        ANNOUNCEMENT: {filename}")
-                except OSError as exc:
-                    self.status(f"        FAILED announcement {filename}: {exc}")
-            except Exception as exc:  # noqa: BLE001 - one bad announcement must not abort the rest
-                self.status(f"        ! Error processing announcement: {exc}")
+            base_name = sanitize_component(
+                f"{created}_{title}".strip("_"), fallback="announcement"
+            )
+            filename = self._alloc(out_dir, base_name + ".html")
+            path = os.path.join(out_dir, filename)
+            try:
+                with open(path, "w", encoding="utf-8") as handle:
+                    handle.write(html_document(title, body))
+                self.stats["announcements"] += 1
+                self.status(f"        ANNOUNCEMENT: {filename}")
+            except OSError as exc:
+                self.status(f"        FAILED announcement {filename}: {exc}")
 
     # -------------------------------------------------------------- syllabus
     def _try_syllabus(self, course_id, course_dir):

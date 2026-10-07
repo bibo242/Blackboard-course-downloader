@@ -50,39 +50,6 @@ class ExtractUrlsTests(unittest.TestCase):
         self.assertEqual(cd.extract_bbcswebdav_urls(""), [])
 
 
-class BodyCoercionTests(unittest.TestCase):
-    """Ultra sometimes returns a body as a structured object, not an HTML string."""
-
-    def test_string_body_is_unchanged(self):
-        self.assertEqual(cd.coerce_body_html("<p>x</p>"), "<p>x</p>")
-
-    def test_dict_body_uses_raw_text(self):
-        body = {"rawText": "<p>hello</p>", "webLocation": "https://x/y"}
-        self.assertEqual(cd.coerce_body_html(body), "<p>hello</p>")
-
-    def test_list_body_is_joined(self):
-        self.assertEqual(cd.coerce_body_html(["a", "b"]), "a\nb")
-
-    def test_none_becomes_empty(self):
-        self.assertEqual(cd.coerce_body_html(None), "")
-
-    def test_extract_urls_from_structured_body(self):
-        body = {
-            "rawText": (
-                '<p><a href="https://bb/bbcswebdav/internal/courses/X/'
-                'announcements/_1/notes.pdf" data-bbtype="attachment">notes</a></p>'
-            ),
-            "webLocation": "https://bb/bbcswebdav/internal/courses/X/announcements/_1/",
-        }
-        self.assertEqual(
-            cd.extract_bbcswebdav_urls(body),
-            ["https://bb/bbcswebdav/internal/courses/X/announcements/_1/notes.pdf"],
-        )
-
-    def test_extract_urls_tolerates_non_string(self):
-        self.assertEqual(cd.extract_bbcswebdav_urls({"noText": 5}), [])
-
-
 class KindTests(unittest.TestCase):
     def test_known_handlers(self):
         cases = {
@@ -203,45 +170,6 @@ class EnvCredentialTests(unittest.TestCase):
     def test_missing_file_returns_empty(self):
         with mock.patch.object(cd, "find_env_file", return_value=None):
             self.assertEqual(cd.load_env_credentials(), {})
-
-
-class PublicApiFallbackTests(unittest.TestCase):
-    def test_falls_back_to_public_api_on_404(self):
-        client = cd.UltraClient(cookies=[])
-        with mock.patch.object(client.session, "get") as mock_get:
-            internal_404 = mock.Mock(status_code=404)
-            public_200 = mock.Mock(status_code=200)
-            public_200.json.return_value = {"results": [1]}
-            mock_get.side_effect = [internal_404, public_200]
-            result = client.get("/learn/api/v1/courses/_1/announcements")
-            self.assertEqual(result, {"results": [1]})
-            self.assertEqual(mock_get.call_count, 2)
-
-    def test_falls_back_to_public_api_on_403(self):
-        client = cd.UltraClient(cookies=[])
-        with mock.patch.object(client.session, "get") as mock_get:
-            internal_403 = mock.Mock(status_code=403)
-            public_200 = mock.Mock(status_code=200)
-            public_200.json.return_value = {"results": [2]}
-            mock_get.side_effect = [internal_403, public_200]
-            result = client.get("/learn/api/v1/courses/_1/announcements")
-            self.assertEqual(result, {"results": [2]})
-
-    def test_no_fallback_when_public_also_fails(self):
-        client = cd.UltraClient(cookies=[])
-        with mock.patch.object(client.session, "get") as mock_get:
-            mock_get.return_value = mock.Mock(status_code=404)
-            result = client.get("/learn/api/v1/courses/_1/announcements", allow_404=True)
-            self.assertIsNone(result)
-
-    def test_no_fallback_on_success(self):
-        client = cd.UltraClient(cookies=[])
-        with mock.patch.object(client.session, "get") as mock_get:
-            mock_get.return_value = mock.Mock(status_code=200)
-            mock_get.return_value.json.return_value = {"results": [3]}
-            result = client.get("/learn/api/v1/courses/_1/announcements")
-            self.assertEqual(result, {"results": [3]})
-            self.assertEqual(mock_get.call_count, 1)
 
 
 class BrowserFallbackTests(unittest.TestCase):
