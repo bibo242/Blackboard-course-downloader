@@ -257,7 +257,8 @@ def setup_driver(browser_choice, status_callback, headless=True):
                 os.path.expanduser("~/bin/geckodriver"),
                 os.path.expanduser("~/.local/bin/geckodriver"),
                 "/usr/local/bin/geckodriver",
-                "/tmp/opencode/geckodriver",
+                "/usr/bin/geckodriver",
+                "/opt/homebrew/bin/geckodriver",
             ):
                 if os.path.isfile(candidate):
                     geckodriver_path = candidate
