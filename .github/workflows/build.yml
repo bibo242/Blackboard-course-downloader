@@ -62,7 +62,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt pyinstaller pillow
+          python -m pip install -r requirements.txt pyinstaller
       - name: Install Tk system libraries (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y python3-tk
@@ -90,14 +90,13 @@ jobs:
       - name: Build executable (macOS)
         if: runner.os == 'macOS'
         run: |
-          pyinstaller --noconfirm --onefile --windowed --icon icon.ico \
-            --target-architecture universal2 \
+          pyinstaller --noconfirm --onefile --windowed --icon icon.icns \
             --collect-all customtkinter --name course_downloader course_downloader.py
           mkdir -p release-assets
           if [ -d dist/course_downloader.app ]; then
-            (cd dist && zip -ry ../release-assets/course_downloader-macos-universal2.zip course_downloader.app)
+            (cd dist && zip -ry ../release-assets/course_downloader-macos-arm64.zip course_downloader.app)
           else
-            (cd dist && zip -r ../release-assets/course_downloader-macos-universal2.zip course_downloader)
+            (cd dist && zip -r ../release-assets/course_downloader-macos-arm64.zip course_downloader)
           fi
 
       - name: Upload build artifact
