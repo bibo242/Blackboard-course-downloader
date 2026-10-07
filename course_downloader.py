@@ -137,8 +137,37 @@ def sanitize_component(name, fallback="untitled", max_len=180):
     return name[:max_len]
 
 
+def coerce_body_html(body):
+    """Normalise an Ultra content body to an HTML string.
+
+    The internal Ultra API returns some bodies as plain HTML strings but others
+    as structured objects, e.g. ``{'rawText': '<p>...</p>', 'webLocation': ...}``.
+    Passing such an object straight to ``html_document`` writes a Python dict
+    repr into the file, and the embedded-file scan (regex over a string) would
+    raise or silently miss everything.
+    """
+    if body is None:
+        return ""
+    if isinstance(body, str):
+        return body
+    if isinstance(body, dict):
+        for key in ("rawText", "rawHtml", "html", "text", "body", "value"):
+            value = body.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
+        return "\n".join(
+            coerce_body_html(value)
+            for value in body.values()
+            if isinstance(value, (str, dict, list, tuple))
+        )
+    if isinstance(body, (list, tuple)):
+        return "\n".join(coerce_body_html(item) for item in body)
+    return str(body)
+
+
 def extract_bbcswebdav_urls(body):
     """Return unique /bbcswebdav/ URLs referenced by an Ultra body (BBML/HTML)."""
+    body = coerce_body_html(body)
     if not body:
         return []
     found = _BBCSWEBDav_RE.findall(body)
@@ -1073,7 +1102,7 @@ class CourseDownloader:
 
     def _handle_document(self, course_id, item, title, dir_path):
         self.status(f"        Document: {title}")
-        body = item.get("body") or ""
+        body = coerce_body_html(item.get("body"))
         if body:
             link_map = self._download_embeds(course_id, dir_path, title, body)
             for original, local in link_map.items():
@@ -1239,8 +1268,8 @@ class CourseDownloader:
                     continue
                 title = (announcement.get("title") or "announcement").strip()
                 created = (announcement.get("created") or "")[:10]
-                body = announcement.get("body") or ""
-                if isinstance(body, str) and body:
+                body = coerce_body_html(announcement.get("body"))
+                if body:
                     link_map = self._download_embeds(course_id, out_dir, title, body)
                     for original, local in link_map.items():
                         body = body.replace(original, local)

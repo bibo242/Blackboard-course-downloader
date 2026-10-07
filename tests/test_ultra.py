@@ -50,6 +50,39 @@ class ExtractUrlsTests(unittest.TestCase):
         self.assertEqual(cd.extract_bbcswebdav_urls(""), [])
 
 
+class BodyCoercionTests(unittest.TestCase):
+    """Ultra sometimes returns a body as a structured object, not an HTML string."""
+
+    def test_string_body_is_unchanged(self):
+        self.assertEqual(cd.coerce_body_html("<p>x</p>"), "<p>x</p>")
+
+    def test_dict_body_uses_raw_text(self):
+        body = {"rawText": "<p>hello</p>", "webLocation": "https://x/y"}
+        self.assertEqual(cd.coerce_body_html(body), "<p>hello</p>")
+
+    def test_list_body_is_joined(self):
+        self.assertEqual(cd.coerce_body_html(["a", "b"]), "a\nb")
+
+    def test_none_becomes_empty(self):
+        self.assertEqual(cd.coerce_body_html(None), "")
+
+    def test_extract_urls_from_structured_body(self):
+        body = {
+            "rawText": (
+                '<p><a href="https://bb/bbcswebdav/internal/courses/X/'
+                'announcements/_1/notes.pdf" data-bbtype="attachment">notes</a></p>'
+            ),
+            "webLocation": "https://bb/bbcswebdav/internal/courses/X/announcements/_1/",
+        }
+        self.assertEqual(
+            cd.extract_bbcswebdav_urls(body),
+            ["https://bb/bbcswebdav/internal/courses/X/announcements/_1/notes.pdf"],
+        )
+
+    def test_extract_urls_tolerates_non_string(self):
+        self.assertEqual(cd.extract_bbcswebdav_urls({"noText": 5}), [])
+
+
 class KindTests(unittest.TestCase):
     def test_known_handlers(self):
         cases = {
