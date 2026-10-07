@@ -153,8 +153,14 @@ target OS):
 pip install -r requirements.txt pyinstaller
 pyinstaller --noconfirm --onefile --windowed --icon icon.ico \
     --collect-all customtkinter \
+    --collect-all selenium \
+    --collect-all webdriver_manager \
     --name course_downloader course_downloader.py
 ```
+
+`--collect-all selenium` (and `webdriver_manager`) is required: Selenium
+lazily imports each browser's driver module, which PyInstaller's static
+analysis would otherwise leave out of the bundle.
 
 The output lands in `dist/`. On macOS use `--icon icon.icns` instead; with
 `--windowed` the result is `dist/course_downloader.app`.

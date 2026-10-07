@@ -73,7 +73,9 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           pyinstaller --noconfirm --onefile --windowed --icon icon.ico \
-            --collect-all customtkinter --name course_downloader course_downloader.py
+            --collect-all customtkinter --collect-all selenium \
+            --collect-all webdriver_manager \
+            --name course_downloader course_downloader.py
           ./dist/course_downloader --help
           mkdir -p release-assets
           cp dist/course_downloader release-assets/course_downloader-linux-x86_64
@@ -83,7 +85,9 @@ jobs:
         shell: bash
         run: |
           pyinstaller --noconfirm --onefile --windowed --icon icon.ico \
-            --collect-all customtkinter --name course_downloader course_downloader.py
+            --collect-all customtkinter --collect-all selenium \
+            --collect-all webdriver_manager \
+            --name course_downloader course_downloader.py
           mkdir -p release-assets
           cp dist/course_downloader.exe release-assets/course_downloader.exe
 
@@ -91,7 +95,9 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           pyinstaller --noconfirm --onefile --windowed --icon icon.icns \
-            --collect-all customtkinter --name course_downloader course_downloader.py
+            --collect-all customtkinter --collect-all selenium \
+            --collect-all webdriver_manager \
+            --name course_downloader course_downloader.py
           mkdir -p release-assets
           if [ -d dist/course_downloader.app ]; then
             (cd dist && zip -ry ../release-assets/course_downloader-macos-arm64.zip course_downloader.app)
