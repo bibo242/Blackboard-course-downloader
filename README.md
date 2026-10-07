@@ -24,7 +24,8 @@ while preserving the original folder structure.
 - **Browser choice:** Google Chrome or Mozilla Firefox.
 - **Headless mode:** run the login browser invisibly in the background.
 - **Incremental:** already-downloaded files are skipped.
-- **Standalone application:** the release `.exe` needs no Python installation.
+- **Standalone application:** prebuilt Windows, macOS and Linux binaries need no
+  Python installation.
 
 ---
 
@@ -42,10 +43,16 @@ while preserving the original folder structure.
 
 ---
 
-## How to use the application (`.exe`)
+## How to use the application
 
-1. Download the latest release and run `course_downloader.exe`.
-   *(Windows may warn that the app is unsigned — click "More info" then "Run anyway".)*
+1. Download the asset for your platform from the
+   [latest release](https://github.com/bibo242/Blackboard-course-downloader/releases/latest):
+   - **Windows:** `course_downloader.exe`
+   - **macOS:** `course_downloader-macos-universal2.zip` (unzip and open the `.app`)
+   - **Linux:** `course_downloader-linux-x86_64` (make it executable first)
+
+   *(Windows may warn that the app is unsigned — click "More info" then "Run anyway".
+   macOS may similarly block the unsigned `.app`; right-click it and choose Open.)*
 2. Enter your KFUPM username and password.
 3. Choose your browser (Chrome or Firefox) and whether to run headless.
 4. Choose what to download (documents, links, announcements, syllabus).
@@ -125,14 +132,32 @@ python -m unittest discover -s tests -v
 
 ---
 
-## Building a standalone `.exe`
+## Building a standalone binary
+
+Standalone binaries for **Windows, macOS and Linux** are built automatically by
+the [build workflow](.github/workflows/build.yml) and attached to the
+[latest release](https://github.com/bibo242/Blackboard-course-downloader/releases/latest).
+Pushing to `main` (or running the workflow manually) refreshes the assets on the
+`v2.0.0` release; pushing a `v*` tag publishes them on that release.
+
+Releases:
+
+- `course_downloader.exe` — Windows (x86_64)
+- `course_downloader-macos-universal2.zip` — macOS (Intel + Apple Silicon)
+- `course_downloader-linux-x86_64` — Linux (x86_64)
+
+To build locally instead (PyInstaller does not cross-compile, so build on the
+target OS):
 
 ```bash
-pip install pyinstaller
+pip install -r requirements.txt pyinstaller pillow
 pyinstaller --noconfirm --onefile --windowed --icon icon.ico \
     --collect-all customtkinter \
     --name course_downloader course_downloader.py
 ```
+
+The output lands in `dist/`. On macOS add `--target-architecture universal2` to
+build a universal `.app`; the file is `dist/course_downloader.app`.
 
 ---
 
