@@ -172,6 +172,61 @@ class EnvCredentialTests(unittest.TestCase):
             self.assertEqual(cd.load_env_credentials(), {})
 
 
+class SchoolTests(unittest.TestCase):
+    def test_default_school_is_kfupm(self):
+        self.assertEqual(cd.DEFAULT_SCHOOL, "KFUPM")
+        self.assertEqual(cd.BASE_URL, cd.SCHOOLS["KFUPM"]["base_url"])
+
+    def test_iau_preset(self):
+        self.assertEqual(cd.SCHOOLS["IAU"]["base_url"], "https://vle.iau.edu.sa/")
+
+    def test_iau_env_keys(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, ".env")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write("IAU_User = 12345\nIAUPassword = s3cret\n")
+            with mock.patch.object(cd, "find_env_file", return_value=path):
+                self.assertEqual(
+                    cd.load_env_credentials("IAU"),
+                    {"username": "12345", "password": "s3cret"},
+                )
+
+    def test_other_schools_keys_are_not_reused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, ".env")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write("User = 12345\nPassword = s3cret\n")
+            with mock.patch.object(cd, "find_env_file", return_value=path):
+                self.assertEqual(cd.load_env_credentials("IAU"), {})
+
+
+class LoggedInTests(unittest.TestCase):
+    class FakeDriver:
+        def __init__(self, url, has_password=False):
+            self.current_url = url
+            self._has_password = has_password
+
+        def find_elements(self, by, selector):
+            return [object()] if self._has_password else []
+
+    def test_accepts_each_school_ultra(self):
+        for school, preset in cd.SCHOOLS.items():
+            driver = self.FakeDriver(preset["base_url"] + "ultra")
+            self.assertTrue(cd._looks_logged_in(driver, preset["base_url"]), school)
+
+    def test_rejects_sso_host(self):
+        driver = self.FakeDriver("https://iauauth.iau.edu.sa/adfs/ls/")
+        self.assertFalse(
+            cd._looks_logged_in(driver, cd.SCHOOLS["IAU"]["base_url"])
+        )
+
+    def test_rejects_still_visible_password_form(self):
+        driver = self.FakeDriver("https://vle.iau.edu.sa/ultra", has_password=True)
+        self.assertFalse(
+            cd._looks_logged_in(driver, cd.SCHOOLS["IAU"]["base_url"])
+        )
+
+
 class BrowserFallbackTests(unittest.TestCase):
     def test_returns_none_without_driver(self):
         client = cd.UltraClient(cookies=[])

@@ -1,12 +1,15 @@
-# KFUPM Blackboard Ultra Course Downloader
+# Blackboard Ultra Course Downloader
 
-A tool to locally back up entire KFUPM Blackboard **Ultra** courses with a single
-click. It logs into Blackboard through KFUPM Single Sign-On, reads every course
-through the Blackboard Learn REST API, and saves all materials to your computer
-while preserving the original folder structure.
+A tool to locally back up entire Blackboard **Ultra** courses with a single
+click. It logs into Blackboard through the institution's Single Sign-On, reads
+every course through the Blackboard Learn REST API, and saves all materials to
+your computer while preserving the original folder structure.
 
-> This is the Ultra version. The original project targeted Blackboard Classic,
-> which no longer matches KFUPM's current Blackboard.
+Implemented schools: **KFUPM** (default) and **IAU**. See
+[Implemented schools](#implemented-schools) for details and for adding another
+one.
+
+> This is the Ultra version; the original project targeted Blackboard Classic.
 
 ---
 
@@ -31,10 +34,9 @@ while preserving the original folder structure.
 
 ## How it works
 
-1. **Login** is performed in a real browser (Selenium) so KFUPM's SAML Single
-   Sign-On (`login.kfupm.edu.sa`, WSO2 Identity Server) works exactly as it does
-   manually. Your credentials are entered into the SSO page; they are not sent
-   anywhere else.
+1. **Login** is performed in a real browser (Selenium) so the institution's
+   SAML/ADFS Single Sign-On works exactly as it does manually. Your credentials
+   are entered into the SSO page; they are not sent anywhere else.
 2. **Course data** is read with the Blackboard Learn REST API
    (`/learn/api/public/v1/...`) using the session cookies from that browser.
    This is much faster and more reliable than scraping Ultra's rendered pages.
@@ -53,7 +55,8 @@ while preserving the original folder structure.
 
    *(Windows may warn that the app is unsigned — click "More info" then "Run anyway".
    macOS may similarly block the unsigned `.app`; right-click it and choose Open.)*
-2. Enter your KFUPM username and password.
+2. Choose your school (**KFUPM** is the default) and enter your username and
+   password.
 3. Choose your browser (Chrome or Firefox) and whether to run headless.
 4. Choose what to download (documents, links, announcements, syllabus).
 5. Click **Scan Courses**.
@@ -75,16 +78,65 @@ Instead of typing your username and password every time, you can create a
 `.env` file next to `course_downloader.py`:
 
 ```dotenv
+# KFUPM (default school)
 User = 202012345
 Password = your-password
+
+# IAU
+IAU_User = your-username
+IAUPassword = your-password
 ```
 
-Accepted key names (case-insensitive): `User`, `Username`, `BB_USERNAME`,
-`KFUPM_USERNAME` and `Password`, `Pass`, `BB_PASSWORD`, `KFUPM_PASSWORD`.
-Spaces around `=` and surrounding quotes are ignored. The app fills the fields
-from `.env` on startup, and keeps those credentials out of `config.ini`.
+Key names are case-insensitive and only the selected school's keys are read.
+Each school declares which spellings it accepts; the table below lists the
+implemented ones. Spaces around `=` and surrounding quotes are ignored. The app
+fills the fields on startup and keeps those credentials out of `config.ini`.
 
 > `.env` is listed in `.gitignore`, so it is never committed. Never share it.
+
+## Implemented schools
+
+| School | Default | Blackboard URL | `.env` username | `.env` password |
+|---|---|---|---|---|
+| **KFUPM** | Yes | `https://blackboard.kfupm.edu.sa/` | `User` | `Password` |
+| **IAU** | No | `https://vle.iau.edu.sa/` | `IAU_User` | `IAUPassword` |
+
+The GUI dropdown and the CLI `--school` option list these entries. KFUPM is
+selected on first run; the last choice is remembered in `config.ini`.
+
+The course/content download logic is generic Blackboard Ultra, so adding a
+school is normally just one entry in the `SCHOOLS` dict at the top of
+`course_downloader.py`:
+
+```python
+"Example": {
+    "base_url": "https://blackboard.example.edu/",
+    "user_keys": ("example_user",),
+    "pass_keys": ("examplepassword",),
+},
+```
+
+The login step is the part that varies: it expects a SAML/ADFS-style form with
+username and password fields. Add `login_url` if the Blackboard landing page
+shows provider links instead of redirecting to SSO (as IAU does). Schools using
+a different SSO or MFA may need extra selectors or a manual, non-headless
+login.
+
+To change the first-run default, edit `DEFAULT_SCHOOL` at the top of
+`course_downloader.py`.
+
+## Command line
+
+```bash
+# List IAU courses and exit
+python course_downloader.py --cli --list --school IAU
+
+# Download IAU courses matching a term
+python course_downloader.py --cli --school IAU --term "2025" --dest ~/IAU
+```
+
+`--school` defaults to `KFUPM`; `--list` prints matching courses without
+downloading anything.
 
 ---
 
@@ -169,7 +221,7 @@ The output lands in `dist/`. On macOS use `--icon icon.icns` instead; with
 
 ## Notes and limitations
 
-- **SSO:** If KFUPM ever enables multi-factor authentication, headless login
+- **SSO:** If a school enables multi-factor authentication, headless login
   cannot complete the second factor automatically. In that case uncheck
   **Headless Mode** and finish the prompt in the browser window.
 - **Read-only:** the tool never modifies anything on Blackboard.
@@ -184,9 +236,9 @@ The output lands in `dist/`. On macOS use `--icon icon.icns` instead; with
 ## Disclaimer
 
 This tool is provided for educational and personal use only. The user is solely
-responsible for complying with all terms of service of King Fahd University of
-Petroleum & Minerals (KFUPM) and Blackboard. Your KFUPM credentials are used
-locally to log into Blackboard and are not stored or transmitted elsewhere.
+responsible for complying with all terms of service of their institution and
+Blackboard. Your credentials are used locally to log into Blackboard and are
+not stored or transmitted elsewhere.
 
 ## License
 
