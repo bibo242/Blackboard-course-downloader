@@ -21,7 +21,9 @@ one.
 - **All file types:** PDF, PPT, DOCX, ZIP, videos, images, and more.
 - **External web links:** saved as `.url` shortcuts.
 - **Ultra documents:** saved as `.html` (with embedded files downloaded too).
-- **Assignments & tests:** saved as `.url` shortcuts plus any attachments.
+- **Assignments & tests:** one folder per assessment with an assessment info
+  page, instructor instructions/files, your submitted files, and a clean
+  question/answer report for online submissions.
 - **Announcements:** saved as `.html` with attachments.
 - **Syllabus:** saved when the course exposes one.
 - **Browser choice:** Google Chrome or Mozilla Firefox.
@@ -40,8 +42,10 @@ one.
 2. **Course data** is read with the Blackboard Learn REST API
    (`/learn/api/public/v1/...`) using the session cookies from that browser.
    This is much faster and more reliable than scraping Ultra's rendered pages.
-3. **Files** are streamed to disk from the attachment endpoints, and `.url`
-   shortcuts are written for external links.
+3. **Files** are streamed to disk from the attachment endpoints. Assessment
+   submissions are fetched from the gradebook (latest attempt), and online
+   question/answer submissions are rendered to HTML. `.url` shortcuts are
+   written only for external links.
 
 ---
 
@@ -175,12 +179,26 @@ python -m unittest discover -s tests -v
         ├── <Folder>/
         │   ├── lecture.pdf
         │   └── notes.docx
+        ├── Assessments/
+        │   └── Homework 1/
+        │       ├── Homework 1_assessment_info.html
+        │       ├── ME489_HW1.pdf
+        │       └── ME489_HW1_submission.pdf
         ├── Some Document.html
         ├── External Link.url
-        ├── Assignment.url
         └── Announcements/
             └── 2026-01-15_Welcome.html
 ```
+
+Assessment folders contain:
+- `<assessment>_assessment_info.html` — status, score, submission date, latest
+  attempt, receipt, due date, instructions, instructor feedback, file list, and
+  a question-by-question report for online submissions.
+- Instructor files with their original names.
+- Your submitted files with a `_submission` suffix.
+
+Assessment `.url` files are no longer created. `.url` is only used for real
+external links.
 
 ---
 
@@ -225,9 +243,9 @@ The output lands in `dist/`. On macOS use `--icon icon.icns` instead; with
   cannot complete the second factor automatically. In that case uncheck
   **Headless Mode** and finish the prompt in the browser window.
 - **Read-only:** the tool never modifies anything on Blackboard.
-- **Assignments/tests:** student submissions are not downloaded (Blackboard does
-  not expose them for this use case); the tool saves a link to the item and any
-  instructor attachments.
+- **Assignments/tests:** the latest attempt is downloaded. Submitted files are
+  saved with a `_submission` suffix; online question/answer submissions are
+  included in the assessment info page. Older attempts are not downloaded.
 - **Syllabus:** saved on a best-effort basis because Ultra tenants expose it
   differently.
 

@@ -1,7 +1,7 @@
 name: Build release binaries
 
 # Builds standalone binaries for Linux, macOS and Windows and attaches them to
-# the release. A push to main (or a manual run) refreshes the v2.0.0 release;
+# the release. A push to main (or a manual run) refreshes the v2.1.0 release;
 # pushing a v* tag attaches the binaries to that tag's release instead.
 on:
   workflow_dispatch:
@@ -18,7 +18,7 @@ concurrency:
 
 env:
   PYTHON_VERSION: "3.12"
-  RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'v2.0.0' }}
+  RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'v2.1.0' }}
 
 jobs:
   test:

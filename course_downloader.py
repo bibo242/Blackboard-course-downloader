@@ -20,12 +20,15 @@ import re
 import sys
 import time
 import json
+import base64
+import mimetypes
 import shutil
 import argparse
 import threading
 import traceback
+from datetime import datetime, timezone
 from html import escape as html_escape, unescape as html_unescape
-from urllib.parse import urlparse, unquote
+from urllib.parse import quote, urlparse, unquote
 
 import requests
 
@@ -168,6 +171,173 @@ def extract_bbcswebdav_urls(body):
     return out
 
 
+_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".svg"}
+
+
+def html_from_field(value):
+    """Return HTML from a Blackboard text/description field."""
+    if not value:
+        return ""
+    if isinstance(value, dict):
+        return (
+            value.get("displayText")
+            or value.get("rawText")
+            or value.get("text")
+            or ""
+        )
+    return str(value)
+
+
+def html_to_text(value):
+    """Strip HTML tags for a readable filename/label or plain-text field."""
+    text = html_from_field(value)
+    if not text:
+        return ""
+    text = re.sub(r"(?i)<br\s*/?>", "\n", text)
+    text = re.sub(r"(?i)</(p|div|li|h[1-6]|tr)>", "\n", text)
+    text = re.sub(r"(?is)<[^>]+>", "", text)
+    text = html_unescape(text).replace("\xa0", " ")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n\s*\n+", "\n\n", text)
+    return text.strip()
+
+
+def normalize_url(url, base_url):
+    """Turn a Blackboard-relative URL into an absolute one."""
+    url = html_unescape(url or "").strip()
+    if url.startswith("//"):
+        return "https:" + url
+    if url.startswith("/") and not url.startswith("//"):
+        return base_url.rstrip("/") + url
+    return url
+
+
+def absolutize_html(html, base_url):
+    """Prefix root-relative href/src values in an HTML fragment."""
+    if not html:
+        return ""
+
+    def replace(match):
+        attr, quote_char, value = match.group(1), match.group(2), match.group(3)
+        if value.startswith("//"):
+            value = "https:" + value
+        else:
+            value = base_url.rstrip("/") + value
+        return f"{attr}={quote_char}{value}{quote_char}"
+
+    return re.sub(
+        r'(href|src)=(["\'])(/[^"\']*)\2',
+        replace,
+        html,
+        flags=re.IGNORECASE,
+    )
+
+
+def add_submission_suffix(name):
+    """Mark a student-supplied file so it cannot be mistaken for an instructor file."""
+    name = name or "submission"
+    stem, ext = os.path.splitext(name)
+    if stem.lower().endswith("_submission"):
+        return name
+    return f"{stem}_submission{ext}"
+
+
+def pretty_status(value):
+    return str(value or "").replace("_", " ").strip().title()
+
+
+QUESTION_TYPE_LABELS = {
+    "multipleanswer": "Multiple answer",
+    "multiplechoice": "Multiple choice",
+    "calculatednumeric": "Calculated numeric",
+    "fileupload": "File upload",
+    "shortanswer": "Short answer",
+    "truefalse": "True / false",
+    "eitheror": "Either / or",
+    "fillinmultipleblanks": "Fill in multiple blanks",
+    "matching": "Matching",
+}
+
+
+def format_ts(value):
+    """Format an ISO timestamp as a readable UTC value."""
+    if not value or value == "—":
+        return value or "—"
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(timezone.utc)
+        return parsed.strftime("%Y-%m-%d %H:%M UTC")
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def extract_bbcswebdav_links(html, include_images=False):
+    """Return bbcswebdav links with their best-known file name/MIME type."""
+    if not html:
+        return []
+    links = []
+    seen = set()
+
+    def add(url, name, mime, is_image):
+        url = html_unescape(url or "").strip()
+        if not url or url in seen:
+            return
+        if not url.startswith(("http://", "https://", "/", "//")):
+            return
+        if not name:
+            name = os.path.basename(unquote(urlparse(url).path)) or "file"
+        name = sanitize_component(name, fallback="file")
+        seen.add(url)
+        links.append({"url": url, "name": name, "mime": mime or "", "is_image": is_image})
+
+    for match in re.finditer(r"<a\b([^>]*)>(.*?)</a>", html, re.IGNORECASE | re.DOTALL):
+        attrs, inner = match.group(1), match.group(2)
+        href = re.search(r'href\s*=\s*(["\'])([^"\']+)\1', attrs, re.IGNORECASE)
+        if not href:
+            continue
+        url = html_unescape(href.group(2))
+        if "/bbcswebdav/" not in url:
+            continue
+        info = {}
+        bb_file = re.search(
+            r'data-bbfile\s*=\s*(["\'])([^"\']+)\1', attrs, re.IGNORECASE
+        )
+        if bb_file:
+            try:
+                info = json.loads(html_unescape(bb_file.group(2)))
+            except (TypeError, ValueError):
+                info = {}
+        name = info.get("fileName") or info.get("displayName")
+        if not name:
+            label = html_to_text(inner)
+            if label and os.path.splitext(label)[1]:
+                name = label
+        if not name:
+            name = os.path.basename(unquote(urlparse(url).path))
+        mime = info.get("mimeType") or mimetypes.guess_type(name)[0] or ""
+        is_image = mime.lower().startswith("image/") or (
+            os.path.splitext(name)[1].lower() in _IMAGE_EXTENSIONS
+        )
+        add(url, name, mime, is_image)
+
+    if include_images:
+        for match in re.finditer(r"<img\b[^>]*>", html, re.IGNORECASE):
+            src = re.search(
+                r'src\s*=\s*(["\'])([^"\']+)\1', match.group(0), re.IGNORECASE
+            )
+            if not src:
+                continue
+            url = html_unescape(src.group(2))
+            if not url.startswith(("http://", "https://", "/", "//")):
+                continue
+            name = os.path.basename(unquote(urlparse(url).path)) or "image"
+            mime = mimetypes.guess_type(name)[0] or ""
+            add(url, name, mime, True)
+
+    return links
+
+
 def kind_for_handler(handler, item=None):
     """Classify a content item into folder/file/document/link/assessment/other."""
     handler = (handler or "").strip().lower()
@@ -208,6 +378,172 @@ def html_document(title, body):
         "td,th{border:1px solid #bbb;padding:4px 8px}</style></head><body>\n"
         f"<h1>{html_escape(title)}</h1>\n{body}\n</body></html>\n"
     )
+
+
+ASSESSMENT_INFO_CSS = """
+:root {
+  --bg: #f3f5f9;
+  --card: #ffffff;
+  --ink: #16202f;
+  --muted: #667085;
+  --line: #e4e8ef;
+  --accent: #3b5bdb;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+  line-height: 1.55;
+}
+.page { max-width: 1000px; margin: 0 auto; padding: 32px 18px 64px; }
+.hero {
+  background: linear-gradient(135deg, #1e293b, #334155);
+  color: #fff;
+  border-radius: 18px;
+  padding: 28px 30px;
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.15);
+}
+.eyebrow {
+  font-size: 0.72rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  opacity: 0.7;
+}
+.hero h1 {
+  margin: 0.25rem 0 1rem;
+  font-size: clamp(1.5rem, 3vw, 2.1rem);
+  line-height: 1.2;
+}
+.hero-row { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 700;
+  background: #e5e7eb;
+  color: #374151;
+}
+.badge.graded { background: #d1fae5; color: #065f46; }
+.badge.submitted { background: #dbeafe; color: #1e40af; }
+.badge.needs-grading { background: #fef3c7; color: #92400e; }
+.badge.not-submitted, .badge.no-grade { background: #e5e7eb; color: #374151; }
+.score {
+  font-size: clamp(1rem, 2vw, 1.35rem);
+  font-weight: 700;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.12);
+  padding: 8px 14px;
+  border-radius: 12px;
+}
+.meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+  margin: 18px 0;
+}
+.meta > div {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px 14px;
+}
+.meta .label {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  margin-bottom: 3px;
+}
+.meta .value { font-weight: 600; word-break: break-word; }
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 24px;
+  margin-top: 18px;
+  box-shadow: 0 1px 3px rgba(16, 24, 40, 0.05);
+}
+.card h2 { margin: 0 0 14px; font-size: 1.1rem; letter-spacing: -0.01em; }
+.card p:first-child { margin-top: 0; }
+.card img { max-width: 100%; height: auto; border-radius: 8px; }
+.card table { width: 100%; border-collapse: collapse; }
+.card td, .card th { border: 1px solid var(--line); padding: 6px 8px; text-align: left; }
+.files ul { list-style: none; margin: 0; padding: 0; }
+.files li { padding: 10px 0; border-bottom: 1px solid var(--line); }
+.files li:last-child { border-bottom: 0; }
+.files a { color: var(--accent); text-decoration: none; font-weight: 600; }
+.files a:hover { text-decoration: underline; }
+.question { border-top: 1px solid var(--line); padding: 18px 0; }
+.question:first-of-type { border-top: 0; padding-top: 0; }
+.question-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.qnumber { font-weight: 700; font-size: 0.95rem; }
+.qtype {
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.result {
+  font-size: 0.72rem;
+  font-weight: 700;
+  padding: 3px 8px;
+  border-radius: 999px;
+}
+.result-correct { background: #d1fae5; color: #065f46; }
+.result-incorrect { background: #fee4e2; color: #b42318; }
+.result-partial { background: #fef3c7; color: #92400e; }
+.result-submitted { background: #dbeafe; color: #1e40af; }
+.points { color: var(--muted); font-size: 0.78rem; margin-left: auto; }
+.qtitle { font-weight: 600; margin: 4px 0 8px; }
+.qtext { margin: 8px 0 0; }
+.answer-block {
+  background: #f8fafc;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin-top: 10px;
+}
+.answer-label {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+.answer-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.correct-answer { margin-top: 8px; color: #065f46; font-size: 0.9rem; }
+.qfeedback {
+  margin-top: 10px;
+  padding: 10px 12px;
+  background: #f8fafc;
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+}
+.option-list { list-style: none; margin: 8px 0 0; padding: 0; }
+.option { display: flex; gap: 8px; padding: 6px 8px; border-radius: 8px; }
+.option.selected { background: #eef2ff; }
+.option.selected:not(.correct) { background: #fee4e2; }
+.option.selected.correct { background: #d1fae5; }
+.option.correct .option-text { color: #065f46; font-weight: 600; }
+.option-mark { width: 1.2em; font-weight: 700; }
+.option-correct {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #065f46;
+  margin-left: 6px;
+}
+.muted { color: var(--muted); }
+@media (max-width: 600px) {
+  .page { padding: 16px 12px 40px; }
+  .hero { padding: 22px 18px; }
+  .card { padding: 18px; }
+}
+"""
 
 
 def write_url_file(path, url):
@@ -456,6 +792,16 @@ def _looks_logged_in(driver, base_url=BASE_URL):
     except WebDriverException:
         pass
     return True
+
+
+def _page_not_found(driver):
+    """True when the browser is showing Ultra's generic not-found page."""
+    try:
+        if (driver.title or "").strip().lower() == "page not found":
+            return True
+        return bool(driver.find_elements(By.CSS_SELECTOR, ".page-not-found"))
+    except WebDriverException:
+        return False
 
 
 def login(driver, username, password, status_callback, school=DEFAULT_SCHOOL,
@@ -908,6 +1254,9 @@ class CourseDownloader:
         self._lock = threading.Lock()
         self._syllabus_seen = False
         self._root_failed = False
+        self._user_id = None
+        self._gradebook_columns = {}
+        self._image_cache = {}
         self.failed_courses = []
         self.stats = {
             "files": 0,
@@ -948,6 +1297,8 @@ class CourseDownloader:
     def run(self, course, base_dir):
         self._syllabus_seen = False
         self._root_failed = False
+        self._user_id = None
+        self._gradebook_columns = {}
         course_dir = os.path.join(
             base_dir,
             sanitize_component(course.get("term", "Unknown Term")),
@@ -956,6 +1307,7 @@ class CourseDownloader:
         os.makedirs(course_dir, exist_ok=True)
         self.status(f"    Output folder: {course_dir}")
 
+        self._prepare_gradebook(course["id"])
         self._walk(course["id"], None, course_dir, depth=0)
 
         if self._root_failed:
@@ -973,6 +1325,33 @@ class CourseDownloader:
             self._try_syllabus(course["id"], course_dir)
 
         return self.stats
+
+    def _prepare_gradebook(self, course_id):
+        """Cache the current user and the course's gradebook columns."""
+        try:
+            me = self.client.get(f"{API_ROOT}/users/me")
+            self._user_id = (me or {}).get("id")
+        except UltraError as exc:
+            self.status(f"    ! Could not read user id: {exc}")
+            return
+        if not self._user_id:
+            return
+        try:
+            columns = self.client.get_all(
+                f"{API_ROOT}/courses/{course_id}/gradebook/columns"
+            )
+        except UltraError as exc:
+            self.status(f"    ! Gradebook unavailable: {exc}")
+            return
+        self._gradebook_columns = {
+            column.get("contentId"): column
+            for column in columns
+            if column.get("contentId") and column.get("id")
+        }
+        if self._gradebook_columns:
+            self.status(
+                f"    Gradebook: {len(self._gradebook_columns)} gradable item(s)"
+            )
 
     # ------------------------------------------------------------ tree walk
     def _walk(self, course_id, folder_id, dir_path, depth):
@@ -997,6 +1376,8 @@ class CourseDownloader:
                 continue
             handler = ((item.get("contentHandler") or {}).get("id") or "").strip()
             title = (item.get("title") or content_id).strip()
+            if "syllabus" in handler.lower() or "syllabus" in title.lower():
+                self._syllabus_seen = True
             kind = kind_for_handler(handler, item)
 
             if kind == "folder":
@@ -1011,8 +1392,6 @@ class CourseDownloader:
                 self._handle_file(course_id, item, title, dir_path)
 
             elif kind == "document":
-                if "syllabus" in handler or title.lower().startswith("syllabus"):
-                    self._syllabus_seen = True
                 if self.options.get("documents", True):
                     self._handle_document(course_id, item, title, dir_path)
                 else:
@@ -1086,22 +1465,660 @@ class CourseDownloader:
 
     def _handle_assessment(self, course_id, item, title, dir_path):
         self.status(f"        Assessment/Assignment: {title}")
-        outline_url = f"{self.client.base}/ultra/courses/{course_id}/outline"
-        self._write_url(dir_path, title, outline_url)
-        self._download_attachments(course_id, item.get("id"), dir_path, title)
+        folder_name = self._alloc(
+            dir_path,
+            sanitize_component(title, fallback=item.get("id", "assessment")),
+        )
+        assessment_dir = os.path.join(dir_path, folder_name)
+        os.makedirs(assessment_dir, exist_ok=True)
+
+        try:
+            info = self._collect_assessment_info(
+                course_id, item, assessment_dir
+            )
+        except Exception as exc:  # noqa: BLE001 - keep the rest of the course
+            self.status(f"          - assessment info failed: {exc}")
+            info = {
+                "status": "No gradebook entry",
+                "score": "—",
+                "submitted": "—",
+                "due": "—",
+                "attempt": "—",
+                "attempts": "0",
+                "receipt": "—",
+                "graded": "—",
+                "instructions": html_from_field(item.get("body"))
+                or html_from_field(item.get("description")),
+                "feedback": "",
+                "answers": [],
+            }
+        self._write_assessment_info(assessment_dir, folder_name, title, info)
+
+    def _collect_assessment_info(self, course_id, item, assessment_dir):
+        content_id = item.get("id")
+        column = self._gradebook_columns.get(content_id)
+        column_id = (column or {}).get("id")
+        grade = None
+        grade_id = None
+        attempts = []
+        attempt = None
+        answer_results = []
+        student_submission_html = ""
+        instructions_html = (
+            html_from_field(item.get("body"))
+            or html_from_field(item.get("description"))
+        )
+
+        if column_id and self._user_id:
+            try:
+                grades_payload = self.client.get(
+                    f"/learn/api/v1/courses/{course_id}/gradebook/columns/"
+                    f"{column_id}/grades?userId={self._user_id}",
+                    allow_404=True,
+                )
+            except UltraError as exc:
+                self.status(f"          - grade lookup failed: {exc}")
+                grades_payload = None
+            results = (grades_payload or {}).get("results") or []
+            grade = results[0] if results else None
+            grade_id = (grade or {}).get("id")
+
+            if grade_id:
+                try:
+                    attempts_payload = self.client.get(
+                        f"/learn/api/v1/courses/{course_id}/gradebook/columns/"
+                        f"{column_id}/attempts?gradeId={grade_id}",
+                        allow_404=True,
+                    )
+                except UltraError as exc:
+                    self.status(f"          - attempt lookup failed: {exc}")
+                    attempts_payload = None
+                attempts = (
+                    ((attempts_payload or {}).get("lookup") or {}).get(grade_id)
+                    or []
+                )
+                last_id = (grade or {}).get("lastAttemptId")
+                attempt = next(
+                    (a for a in attempts if a.get("id") == last_id), None
+                )
+                if attempt is None and attempts:
+                    attempt = max(
+                        attempts,
+                        key=lambda a: a.get("attemptDate")
+                        or a.get("creationDate")
+                        or "",
+                    )
+
+            if attempt:
+                attempt_id = attempt.get("id")
+                student_submission_html = html_from_field(
+                    attempt.get("studentSubmission")
+                )
+                try:
+                    attempt_detail = self.client.get(
+                        f"/learn/api/v1/courses/{course_id}/gradebook/attempts/"
+                        f"{attempt_id}?columnId={column_id}"
+                        "&expand=toolAttemptDetail",
+                        allow_404=True,
+                    )
+                except UltraError as exc:
+                    self.status(f"          - instructions lookup failed: {exc}")
+                    attempt_detail = None
+                detail = (
+                    ((attempt_detail or {}).get("toolAttemptDetail") or {})
+                    .get("resource/x-bb-assessment")
+                    or {}
+                )
+                assessment = detail.get("assessment") or {}
+                instructions_html = (
+                    html_from_field(assessment.get("instructions"))
+                    or instructions_html
+                )
+
+                try:
+                    answers_payload = self.client.get(
+                        f"/learn/api/v1/courses/{course_id}/gradebook/attempts/"
+                        f"{attempt_id}/assessment/answers"
+                        "?expand=questionAttempt.question,"
+                        "questionAttempt.question.usageCount,"
+                        "questionAttempt.question.sourceInfo,"
+                        "questionAttempt.answerCorrectness",
+                        allow_404=True,
+                    )
+                except UltraError as exc:
+                    self.status(f"          - answers lookup failed: {exc}")
+                    answers_payload = None
+                answer_results = (answers_payload or {}).get("results") or []
+                if not instructions_html:
+                    for result in answer_results:
+                        question = result.get("question") or {}
+                        if question.get("questionType") == "presentation":
+                            instructions_html = html_from_field(
+                                question.get("questionText")
+                            )
+                            if instructions_html:
+                                break
+
+                files = attempt.get("studentSubmissionFiles") or []
+                self._download_submission_files(
+                    files, student_submission_html, assessment_dir
+                )
+
+        self._download_instruction_files(instructions_html, assessment_dir)
+
+        receipt = (attempt or {}).get("attemptReceipt") or {}
+        due = (
+            ((column or {}).get("grading") or {}).get("due")
+            or (column or {}).get("dueDate")
+            or ""
+        )
+        attempt_label = ""
+        if attempt:
+            attempt_label = str(attempt.get("id"))
+            if len(attempts) > 1:
+                attempt_label += f" (latest of {len(attempts)})"
+        return {
+            "status": self._assessment_status(column, grade, attempt),
+            "score": self._assessment_score(column, grade),
+            "submitted": receipt.get("submissionDate")
+            or (attempt or {}).get("attemptDate")
+            or "—",
+            "due": due or "—",
+            "attempt": attempt_label or "—",
+            "attempts": str(len(attempts)),
+            "receipt": receipt.get("receiptId") or "—",
+            "graded": (attempt or {}).get("attemptLastGradedDate")
+            or (attempt or {}).get("attemptFirstGradedDate")
+            or "—",
+            "instructions": instructions_html,
+            "feedback": html_from_field(
+                (grade or {}).get("instructorFeedback")
+            ),
+            "answers": answer_results,
+        }
+
+    @staticmethod
+    def _assessment_status(column, grade, attempt):
+        if not column:
+            return "No gradebook entry"
+        if grade:
+            if (grade.get("effectiveScore") is not None
+                    or (grade.get("displayGrade") or {}).get("score")
+                    is not None):
+                return "Graded"
+            status = (grade.get("status") or "").upper()
+            if status == "GRADED":
+                return "Graded"
+            if attempt:
+                return "Submitted"
+            if status:
+                return pretty_status(status)
+        if attempt:
+            return "Submitted"
+        return "Not submitted"
+
+    @staticmethod
+    def _assessment_score(column, grade):
+        if not column:
+            return "—"
+        score = (grade or {}).get("effectiveScore")
+        possible = (grade or {}).get("pointsPossible")
+        if possible is None:
+            possible = ((column or {}).get("score") or {}).get("possible")
+        if score is None:
+            if possible:
+                return f"Not graded ({possible:g} possible)"
+            return "Not graded"
+        text = f"{score:g} / {possible:g}" if possible else f"{score:g}"
+        if ((grade or {}).get("displayGrade") or {}).get("isOverride"):
+            text += " (override)"
+        return text
+
+    def _download_instruction_files(self, html, dir_path):
+        for link in extract_bbcswebdav_links(html, include_images=False):
+            if link.get("is_image"):
+                continue
+            url = normalize_url(link["url"], self.client.base)
+            if not url.startswith(("http://", "https://")):
+                continue
+            filename = self._alloc(
+                dir_path,
+                sanitize_component(link.get("name"), fallback="instruction"),
+            )
+            dest = os.path.join(dir_path, filename)
+            status, size, info = self.client.download(url, dest)
+            if status == "saved":
+                self.stats["files"] += 1
+                self.status(
+                    f"          SAVED (instructions): {filename} ({size} bytes)"
+                )
+            elif status == "skipped":
+                self.stats["skipped"] += 1
+                self.status(f"          SKIPPED (instructions): {filename}")
+            else:
+                self.stats["failed"] += 1
+                self.status(
+                    f"          FAILED (instructions): {filename} - {info}"
+                )
+
+    def _download_submission_files(self, files, submission_html, dir_path):
+        seen_urls = set()
+        for attachment in files or []:
+            file_info = attachment.get("file") or {}
+            url = normalize_url(
+                file_info.get("permanentUrl")
+                or file_info.get("url")
+                or attachment.get("permanentUrl")
+                or "",
+                self.client.base,
+            )
+            if not url.startswith(("http://", "https://")):
+                continue
+            seen_urls.add(url)
+            name = (
+                file_info.get("fileName")
+                or attachment.get("fileName")
+                or attachment.get("name")
+                or attachment.get("linkName")
+                or "submission"
+            )
+            self._download_one_submission(url, name, dir_path)
+
+        for link in extract_bbcswebdav_links(
+            submission_html, include_images=False
+        ):
+            url = normalize_url(link["url"], self.client.base)
+            if url in seen_urls or not url.startswith(("http://", "https://")):
+                continue
+            seen_urls.add(url)
+            candidate = add_submission_suffix(
+                sanitize_component(link.get("name"), fallback="submission")
+            )
+            if os.path.exists(os.path.join(dir_path, candidate)):
+                continue
+            self._download_one_submission(url, link.get("name"), dir_path)
+
+    def _download_one_submission(self, url, name, dir_path):
+        name = add_submission_suffix(
+            sanitize_component(name, fallback="submission")
+        )
+        filename = self._alloc(dir_path, name)
+        dest = os.path.join(dir_path, filename)
+        status, size, info = self.client.download(url, dest)
+        if status == "saved":
+            self.stats["files"] += 1
+            self.status(
+                f"          SAVED (submission): {filename} ({size} bytes)"
+            )
+        elif status == "skipped":
+            self.stats["skipped"] += 1
+            self.status(f"          SKIPPED (submission): {filename}")
+        else:
+            self.stats["failed"] += 1
+            self.status(f"          FAILED (submission): {filename} - {info}")
+
+    def _image_data_uri(self, url):
+        if url in self._image_cache:
+            return self._image_cache[url]
+        try:
+            response = self.client.session.get(
+                url, timeout=60, allow_redirects=True
+            )
+        except requests.RequestException:
+            self._image_cache[url] = None
+            return None
+        if response.status_code != 200 or not response.content:
+            self._image_cache[url] = None
+            return None
+        mime = (response.headers.get("Content-Type") or "").split(";")[0].strip()
+        if not mime.startswith("image/"):
+            mime = mimetypes.guess_type(url)[0] or "image/jpeg"
+        data = base64.b64encode(response.content).decode("ascii")
+        data_uri = f"data:{mime};base64,{data}"
+        self._image_cache[url] = data_uri
+        return data_uri
+
+    def _embed_images(self, html):
+        if not html:
+            return html
+
+        def replace(match):
+            tag = match.group(0)
+            src = re.search(
+                r'src\s*=\s*(["\'])([^"\']+)\1', tag, re.IGNORECASE
+            )
+            if not src:
+                return tag
+            url = normalize_url(src.group(2), self.client.base)
+            if not url.startswith(("http://", "https://")):
+                return tag
+            data_uri = self._image_data_uri(url)
+            if not data_uri:
+                return tag
+            return re.sub(
+                r'src\s*=\s*(["\'])([^"\']+)\1',
+                lambda _m: f'src="{data_uri}"',
+                tag,
+                count=1,
+                flags=re.IGNORECASE,
+            )
+
+        return re.sub(r"<img\b[^>]*>", replace, html, flags=re.IGNORECASE)
+
+    def _embed_image_links(self, html):
+        """Replace links to instruction images with inline data-URI images."""
+        if not html:
+            return html
+
+        def replace(match):
+            attrs, inner = match.group(1), match.group(2)
+            href = re.search(
+                r'href\s*=\s*(["\'])([^"\']+)\1', attrs, re.IGNORECASE
+            )
+            if not href:
+                return match.group(0)
+            url = normalize_url(href.group(2), self.client.base)
+            if not url.startswith(("http://", "https://")):
+                return match.group(0)
+            info = {}
+            bb_file = re.search(
+                r'data-bbfile\s*=\s*(["\'])([^"\']+)\1', attrs,
+                re.IGNORECASE,
+            )
+            if bb_file:
+                try:
+                    info = json.loads(html_unescape(bb_file.group(2)))
+                except (TypeError, ValueError):
+                    info = {}
+            name = info.get("fileName") or html_to_text(inner)
+            if not name:
+                name = os.path.basename(unquote(urlparse(url).path))
+            mime = info.get("mimeType") or mimetypes.guess_type(name)[0] or ""
+            is_image = mime.lower().startswith("image/") or (
+                os.path.splitext(name)[1].lower() in _IMAGE_EXTENSIONS
+            )
+            if not is_image:
+                return match.group(0)
+            data_uri = self._image_data_uri(url)
+            if not data_uri:
+                return match.group(0)
+            return (
+                f'<img src="{data_uri}" alt="{html_escape(name)}" '
+                'style="max-width:100%;height:auto">'
+            )
+
+        return re.sub(
+            r"<a\b([^>]*)>(.*?)</a>",
+            replace,
+            html,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+
+    def _prepare_html(self, html):
+        html = html_from_field(html)
+        if not html:
+            return ""
+        html = absolutize_html(html, self.client.base)
+        return self._embed_images(self._embed_image_links(html))
+
+    def _answer_html(self, value):
+        if value is None or value == "" or value == []:
+            return '<span class="muted">No answer</span>'
+        if isinstance(value, dict):
+            text = html_from_field(value)
+            return self._prepare_html(text) if text else (
+                '<span class="muted">No answer</span>'
+            )
+        if isinstance(value, list):
+            parts = []
+            for item in value:
+                if isinstance(item, dict):
+                    text = html_from_field(item) or item.get("label") or ""
+                    parts.append(self._prepare_html(text))
+                else:
+                    parts.append(self._prepare_html(str(item)))
+            return "<br>".join(p for p in parts if p) or (
+                '<span class="muted">No answer</span>'
+            )
+        text = str(value)
+        if "<" in text and ">" in text:
+            return self._prepare_html(text)
+        return f'<div class="answer-text">{html_escape(text)}</div>'
+
+    @staticmethod
+    def _question_badge(result):
+        if result.get("correct") is True:
+            return "Correct", "result-correct"
+        if result.get("partiallyCorrect"):
+            return "Partially correct", "result-partial"
+        if result.get("correct") is False:
+            return "Incorrect", "result-incorrect"
+        return "Answered", "result-submitted"
+
+    def _choice_options_html(self, question, given, show_correct):
+        options = question.get("answers")
+        if not isinstance(options, list) or not isinstance(given, list):
+            return None
+        if len(options) != len(given):
+            return None
+        if not all(isinstance(value, bool) for value in given):
+            return None
+        rows = []
+        for option, selected in zip(options, given):
+            text = html_from_field(option.get("answerText"))
+            text_html = self._prepare_html(text) or "&nbsp;"
+            correct = bool(option.get("correctAnswer")) and show_correct
+            classes = ["option"]
+            if selected:
+                classes.append("selected")
+            if correct:
+                classes.append("correct")
+            mark = "✓" if selected else "&nbsp;"
+            correct_label = (
+                ' <span class="option-correct">correct</span>'
+                if correct else ""
+            )
+            rows.append(
+                f'<li class="{" ".join(classes)}">'
+                f'<span class="option-mark">{mark}</span>'
+                f'<span class="option-text">{text_html}{correct_label}</span>'
+                "</li>"
+            )
+        return '<ul class="option-list">' + "".join(rows) + "</ul>"
+
+    def _render_questions(self, answers):
+        if not answers:
+            return ""
+        blocks = []
+        number = 0
+        for result in answers:
+            question = result.get("question") or {}
+            qtype = (question.get("questionType") or "").strip().lower()
+            if qtype == "presentation":
+                continue
+            number += 1
+            badge, badge_class = self._question_badge(result)
+            points = question.get("points")
+            type_key = qtype.replace("_", "").replace(" ", "")
+            type_label = QUESTION_TYPE_LABELS.get(
+                type_key, pretty_status(qtype) or "Question"
+            )
+            head = [
+                '<div class="question-head">',
+                f'<span class="qnumber">Question {number}</span>',
+                f'<span class="qtype">{html_escape(type_label)}</span>',
+                f'<span class="result {badge_class}">{html_escape(badge)}</span>',
+            ]
+            if points is not None:
+                head.append(
+                    f'<span class="points">{points:g} pts possible</span>'
+                )
+            head.append("</div>")
+            title = question.get("title")
+            question_html = self._prepare_html(question.get("questionText"))
+            parts = ["<article class=\"question\">"] + head
+            if title:
+                parts.append(
+                    f'<div class="qtitle">{html_escape(title)}</div>'
+                )
+            parts.append(
+                '<div class="qtext">'
+                + (question_html or '<p class="muted">No question text.</p>')
+                + "</div>"
+            )
+            given = result.get("givenAnswer")
+            choice_html = self._choice_options_html(
+                question, given, bool(result.get("isCorrectAnswersVisible"))
+            )
+            answer_label = "Answer options" if choice_html else "Your answer"
+            answer_html = choice_html or self._answer_html(given)
+            parts.append(
+                '<div class="answer-block">'
+                f'<div class="answer-label">{answer_label}</div>'
+                + answer_html
+                + "</div>"
+            )
+            if (result.get("isCorrectAnswersVisible")
+                    and question.get("answerValue") is not None):
+                value = question.get("answerValue")
+                tolerance = question.get("toleranceValue")
+                correct_text = f"{value}"
+                if tolerance:
+                    correct_text += f" ± {tolerance}"
+                parts.append(
+                    '<div class="correct-answer">'
+                    '<span class="answer-label">Correct answer</span> '
+                    f"{html_escape(correct_text)}</div>"
+                )
+            if result.get("isFeedbackVisible"):
+                key = (
+                    "correctResponseFeedback"
+                    if result.get("correct")
+                    else "incorrectResponseFeedback"
+                )
+                feedback = html_from_field(question.get(key))
+                if feedback:
+                    parts.append(
+                        f'<div class="qfeedback">{self._prepare_html(feedback)}</div>'
+                    )
+            parts.append("</article>")
+            blocks.append("\n".join(parts))
+        return "\n".join(blocks)
+
+    def _write_assessment_info(self, dir_path, folder_name, title, info):
+        info_filename = f"{folder_name}_assessment_info.html"
+        status = info.get("status") or "Unknown"
+        status_key = status.lower().replace(" ", "-")
+        status_class = {
+            "graded": "graded",
+            "submitted": "submitted",
+            "needs-grading": "needs-grading",
+            "not-submitted": "not-submitted",
+            "no-gradebook-entry": "no-grade",
+        }.get(status_key, "other")
+        rows = (
+            ("Submitted", format_ts(info.get("submitted"))),
+            ("Due", format_ts(info.get("due"))),
+            ("Attempt", info.get("attempt")),
+            ("Attempts", info.get("attempts")),
+            ("Receipt", info.get("receipt")),
+            ("Last graded", format_ts(info.get("graded"))),
+        )
+        meta = "\n".join(
+            f'<div><div class="label">{html_escape(label)}</div>'
+            f'<div class="value">{html_escape(str(value or "—"))}</div></div>'
+            for label, value in rows
+        )
+        instructions = self._prepare_html(info.get("instructions"))
+        feedback = self._prepare_html(info.get("feedback"))
+        files = [
+            name
+            for name in sorted(os.listdir(dir_path))
+            if name != info_filename
+            and os.path.isfile(os.path.join(dir_path, name))
+        ]
+        if files:
+            file_section = "<ul>\n" + "\n".join(
+                f'<li><a href="{quote(name)}">{html_escape(name)}</a></li>'
+                for name in files
+            ) + "\n</ul>"
+        else:
+            file_section = '<p class="muted">No files.</p>'
+
+        questions_html = self._render_questions(info.get("answers"))
+
+        sections = []
+        if instructions:
+            sections.append(
+                '<section class="card"><h2>Instructions</h2>\n'
+                + instructions
+                + "\n</section>"
+            )
+        if feedback:
+            sections.append(
+                '<section class="card"><h2>Instructor Feedback</h2>\n'
+                + feedback
+                + "\n</section>"
+            )
+        if questions_html:
+            sections.append(
+                '<section class="card"><h2>Submission</h2>\n'
+                + questions_html
+                + "\n</section>"
+            )
+        sections.append(
+            '<section class="card files"><h2>Files</h2>\n'
+            + file_section
+            + "\n</section>"
+        )
+        document = (
+            "<!DOCTYPE html>\n"
+            '<html lang="en"><head><meta charset="utf-8">'
+            '<meta name="viewport" content="width=device-width, initial-scale=1">'
+            f"<title>{html_escape(title)} — Assessment Info</title>\n"
+            "<style>\n" + ASSESSMENT_INFO_CSS + "</style>\n"
+            '<script async src="https://cdn.jsdelivr.net/npm/mathjax@3/'
+            'es5/tex-mml-chtml.js"></script>\n'
+            "</head><body>\n"
+            '<main class="page">\n'
+            '<header class="hero">\n'
+            '<div class="eyebrow">Assessment</div>\n'
+            f"<h1>{html_escape(title)}</h1>\n"
+            '<div class="hero-row">\n'
+            f'<span class="badge {status_class}">{html_escape(status)}</span>\n'
+            f'<span class="score">{html_escape(str(info.get("score") or "—"))}'
+            "</span>\n"
+            "</div>\n</header>\n"
+            f'<section class="meta">\n{meta}\n</section>\n'
+            + "\n".join(sections)
+            + "\n</main>\n"
+            "</body></html>\n"
+        )
+        try:
+            with open(
+                os.path.join(dir_path, info_filename), "w", encoding="utf-8"
+            ) as handle:
+                handle.write(document)
+            self.status(f"          ASSESSMENT INFO: {info_filename}")
+        except OSError as exc:
+            self.status(f"          - could not save assessment info: {exc}")
 
     def _handle_other(self, course_id, item, title, dir_path):
         url = None
         for link in item.get("links") or []:
-            if link.get("href"):
-                url = link["href"]
+            href = link.get("href")
+            if href:
+                url = href
                 break
-        if url and url.startswith("/"):
-            url = self.client.base + url
-        self._write_url(
-            dir_path, title,
-            url or f"{self.client.base}/ultra/courses/{course_id}/outline",
-        )
+        if not url:
+            self.status(f"        - No direct link: {title}")
+            return
+        url = normalize_url(url, self.client.base)
+        outline = f"{self.client.base}/ultra/courses/{course_id}/outline"
+        if url.rstrip("/") == outline.rstrip("/"):
+            self.status(f"        - Generic outline link skipped: {title}")
+            return
+        self._write_url(dir_path, title, url)
 
     # ---------------------------------------------------------- attachments
     def _download_attachments(self, course_id, content_id, dir_path, title):
@@ -1232,6 +2249,9 @@ class CourseDownloader:
         try:
             self.driver.get(url)
             time.sleep(3)
+            if _page_not_found(self.driver):
+                self.status("    No syllabus page available.")
+                return
             content = None
             for selector in ("main", "#syllabus", ".syllabus", "[data-testid='syllabus']"):
                 try:
