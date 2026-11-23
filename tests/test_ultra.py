@@ -275,6 +275,14 @@ class AssessmentHelperTests(unittest.TestCase):
         )
         self.assertEqual(cd.html_to_text(""), "")
 
+    def test_format_ts(self):
+        self.assertEqual(
+            cd.format_ts("2026-09-21T20:59:00.000Z"),
+            "2026-09-21 20:59 UTC",
+        )
+        self.assertEqual(cd.format_ts("—"), "—")
+        self.assertEqual(cd.format_ts("not-a-date"), "not-a-date")
+
     def test_html_from_field_accepts_dicts(self):
         self.assertEqual(
             cd.html_from_field({"rawText": "<p>Raw</p>"}), "<p>Raw</p>"
@@ -407,7 +415,21 @@ class AssessmentHelperTests(unittest.TestCase):
             "graded": "2026-10-11T18:18:54.893Z",
             "instructions": "<p>Do the work &amp; submit.</p>",
             "feedback": "<p>Good job</p>",
-            "submission_page": "Homework 1_submission.html",
+            "answers": [
+                {
+                    "question": {
+                        "questionType": "numeric",
+                        "questionText": {"rawText": "<p>Compute 5 + 5.</p>"},
+                        "points": 10,
+                        "answerValue": 10,
+                        "toleranceValue": 0.1,
+                    },
+                    "givenAnswer": "10",
+                    "correct": True,
+                    "isCorrectAnswersVisible": True,
+                    "isFeedbackVisible": True,
+                }
+            ],
         }
         with tempfile.TemporaryDirectory() as tmp:
             with open(os.path.join(tmp, "ME489_HW1.pdf"), "wb") as handle:
@@ -422,8 +444,12 @@ class AssessmentHelperTests(unittest.TestCase):
             self.assertIn("Do the work &amp; submit.", page)
             self.assertIn("Good job", page)
             self.assertIn("ME489_HW1.pdf", page)
-            self.assertIn("Homework%201_submission.html", page)
-            self.assertIn("Open submission page", page)
+            self.assertIn("Question 1", page)
+            self.assertIn("Compute 5 + 5.", page)
+            self.assertIn("Your answer", page)
+            self.assertIn("Correct answer", page)
+            self.assertIn("10 ± 0.1", page)
+            self.assertNotIn("Open submission page", page)
 
 
 if __name__ == "__main__":

@@ -22,8 +22,8 @@ one.
 - **External web links:** saved as `.url` shortcuts.
 - **Ultra documents:** saved as `.html` (with embedded files downloaded too).
 - **Assignments & tests:** one folder per assessment with an assessment info
-  page, instructor instructions/files, your submitted files, and a rendered
-  page for online question/answer submissions.
+  page, instructor instructions/files, your submitted files, and a clean
+  question/answer report for online submissions.
 - **Announcements:** saved as `.html` with attachments.
 - **Syllabus:** saved when the course exposes one.
 - **Browser choice:** Google Chrome or Mozilla Firefox.
@@ -183,8 +183,7 @@ python -m unittest discover -s tests -v
         │   └── Homework 1/
         │       ├── Homework 1_assessment_info.html
         │       ├── ME489_HW1.pdf
-        │       ├── ME489_HW1_submission.pdf
-        │       └── Homework 1_submission.html
+        │       └── ME489_HW1_submission.pdf
         ├── Some Document.html
         ├── External Link.url
         └── Announcements/
@@ -193,11 +192,10 @@ python -m unittest discover -s tests -v
 
 Assessment folders contain:
 - `<assessment>_assessment_info.html` — status, score, submission date, latest
-  attempt, receipt, due date, instructions, instructor feedback, and file list.
+  attempt, receipt, due date, instructions, instructor feedback, file list, and
+  a question-by-question report for online submissions.
 - Instructor files with their original names.
 - Your submitted files with a `_submission` suffix.
-- `<assessment>_submission.html` for online question/answer submissions, with
-  question images embedded in the page.
 
 Assessment `.url` files are no longer created. `.url` is only used for real
 external links.
@@ -246,8 +244,8 @@ The output lands in `dist/`. On macOS use `--icon icon.icns` instead; with
   **Headless Mode** and finish the prompt in the browser window.
 - **Read-only:** the tool never modifies anything on Blackboard.
 - **Assignments/tests:** the latest attempt is downloaded. Submitted files are
-  saved with a `_submission` suffix; online question/answer submissions also get
-  a rendered `<assessment>_submission.html`. Older attempts are not downloaded.
+  saved with a `_submission` suffix; online question/answer submissions are
+  included in the assessment info page. Older attempts are not downloaded.
 - **Syllabus:** saved on a best-effort basis because Ultra tenants expose it
   differently.
 

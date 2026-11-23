@@ -26,6 +26,7 @@ import shutil
 import argparse
 import threading
 import traceback
+from datetime import datetime, timezone
 from html import escape as html_escape, unescape as html_unescape
 from urllib.parse import quote, urlparse, unquote
 
@@ -245,6 +246,19 @@ def pretty_status(value):
     return str(value or "").replace("_", " ").strip().title()
 
 
+def format_ts(value):
+    """Format an ISO timestamp as a readable UTC value."""
+    if not value or value == "—":
+        return value or "—"
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(timezone.utc)
+        return parsed.strftime("%Y-%m-%d %H:%M UTC")
+    except (TypeError, ValueError):
+        return str(value)
+
+
 def extract_bbcswebdav_links(html, include_images=False):
     """Return bbcswebdav links with their best-known file name/MIME type."""
     if not html:
@@ -351,6 +365,158 @@ def html_document(title, body):
         "td,th{border:1px solid #bbb;padding:4px 8px}</style></head><body>\n"
         f"<h1>{html_escape(title)}</h1>\n{body}\n</body></html>\n"
     )
+
+
+ASSESSMENT_INFO_CSS = """
+:root {
+  --bg: #f3f5f9;
+  --card: #ffffff;
+  --ink: #16202f;
+  --muted: #667085;
+  --line: #e4e8ef;
+  --accent: #3b5bdb;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+  line-height: 1.55;
+}
+.page { max-width: 1000px; margin: 0 auto; padding: 32px 18px 64px; }
+.hero {
+  background: linear-gradient(135deg, #1e293b, #334155);
+  color: #fff;
+  border-radius: 18px;
+  padding: 28px 30px;
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.15);
+}
+.eyebrow {
+  font-size: 0.72rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  opacity: 0.7;
+}
+.hero h1 {
+  margin: 0.25rem 0 1rem;
+  font-size: clamp(1.5rem, 3vw, 2.1rem);
+  line-height: 1.2;
+}
+.hero-row { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 700;
+  background: #e5e7eb;
+  color: #374151;
+}
+.badge.graded { background: #d1fae5; color: #065f46; }
+.badge.submitted { background: #dbeafe; color: #1e40af; }
+.badge.needs-grading { background: #fef3c7; color: #92400e; }
+.badge.not-submitted, .badge.no-grade { background: #e5e7eb; color: #374151; }
+.score {
+  font-size: clamp(1rem, 2vw, 1.35rem);
+  font-weight: 700;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.12);
+  padding: 8px 14px;
+  border-radius: 12px;
+}
+.meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+  margin: 18px 0;
+}
+.meta > div {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px 14px;
+}
+.meta .label {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  margin-bottom: 3px;
+}
+.meta .value { font-weight: 600; word-break: break-word; }
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 24px;
+  margin-top: 18px;
+  box-shadow: 0 1px 3px rgba(16, 24, 40, 0.05);
+}
+.card h2 { margin: 0 0 14px; font-size: 1.1rem; letter-spacing: -0.01em; }
+.card p:first-child { margin-top: 0; }
+.card img { max-width: 100%; height: auto; border-radius: 8px; }
+.card table { width: 100%; border-collapse: collapse; }
+.card td, .card th { border: 1px solid var(--line); padding: 6px 8px; text-align: left; }
+.files ul { list-style: none; margin: 0; padding: 0; }
+.files li { padding: 10px 0; border-bottom: 1px solid var(--line); }
+.files li:last-child { border-bottom: 0; }
+.files a { color: var(--accent); text-decoration: none; font-weight: 600; }
+.files a:hover { text-decoration: underline; }
+.question { border-top: 1px solid var(--line); padding: 18px 0; }
+.question:first-of-type { border-top: 0; padding-top: 0; }
+.question-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.qnumber { font-weight: 700; font-size: 0.95rem; }
+.qtype {
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.result {
+  font-size: 0.72rem;
+  font-weight: 700;
+  padding: 3px 8px;
+  border-radius: 999px;
+}
+.result-correct { background: #d1fae5; color: #065f46; }
+.result-incorrect { background: #fee4e2; color: #b42318; }
+.result-partial { background: #fef3c7; color: #92400e; }
+.result-submitted { background: #dbeafe; color: #1e40af; }
+.points { color: var(--muted); font-size: 0.78rem; margin-left: auto; }
+.qtitle { font-weight: 600; margin: 4px 0 8px; }
+.qtext { margin: 8px 0 0; }
+.answer-block {
+  background: #f8fafc;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin-top: 10px;
+}
+.answer-label {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+.answer-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.correct-answer { margin-top: 8px; color: #065f46; font-size: 0.9rem; }
+.qfeedback {
+  margin-top: 10px;
+  padding: 10px 12px;
+  background: #f8fafc;
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+}
+.muted { color: var(--muted); }
+@media (max-width: 600px) {
+  .page { padding: 16px 12px 40px; }
+  .hero { padding: 22px 18px; }
+  .card { padding: 18px; }
+}
+"""
 
 
 def write_url_file(path, url):
@@ -1281,7 +1447,7 @@ class CourseDownloader:
 
         try:
             info = self._collect_assessment_info(
-                course_id, item, title, folder_name, assessment_dir
+                course_id, item, assessment_dir
             )
         except Exception as exc:  # noqa: BLE001 - keep the rest of the course
             self.status(f"          - assessment info failed: {exc}")
@@ -1297,12 +1463,11 @@ class CourseDownloader:
                 "instructions": html_from_field(item.get("body"))
                 or html_from_field(item.get("description")),
                 "feedback": "",
-                "submission_page": None,
+                "answers": [],
             }
         self._write_assessment_info(assessment_dir, folder_name, title, info)
 
-    def _collect_assessment_info(self, course_id, item, title, folder_name,
-                                 assessment_dir):
+    def _collect_assessment_info(self, course_id, item, assessment_dir):
         content_id = item.get("id")
         column = self._gradebook_columns.get(content_id)
         column_id = (column or {}).get("id")
@@ -1311,8 +1476,7 @@ class CourseDownloader:
         attempts = []
         attempt = None
         answer_results = []
-        submission_html = ""
-        submission_page = None
+        student_submission_html = ""
         instructions_html = (
             html_from_field(item.get("body"))
             or html_from_field(item.get("description"))
@@ -1360,7 +1524,7 @@ class CourseDownloader:
 
             if attempt:
                 attempt_id = attempt.get("id")
-                submission_html = html_from_field(
+                student_submission_html = html_from_field(
                     attempt.get("studentSubmission")
                 )
                 try:
@@ -1407,29 +1571,11 @@ class CourseDownloader:
                             )
                             if instructions_html:
                                 break
-                    if not instructions_html and len(answer_results) == 1:
-                        question = answer_results[0].get("question") or {}
-                        instructions_html = html_from_field(
-                            question.get("questionText")
-                        )
 
                 files = attempt.get("studentSubmissionFiles") or []
                 self._download_submission_files(
-                    files, submission_html, assessment_dir
+                    files, student_submission_html, assessment_dir
                 )
-                should_render = bool(answer_results) or (
-                    not files and bool(submission_html)
-                )
-                if should_render and grade_id:
-                    submission_page = self._capture_submission_html(
-                        course_id,
-                        content_id,
-                        grade_id,
-                        attempt_id,
-                        assessment_dir,
-                        folder_name,
-                        title,
-                    )
 
         self._download_instruction_files(instructions_html, assessment_dir)
 
@@ -1461,7 +1607,7 @@ class CourseDownloader:
             "feedback": html_from_field(
                 (grade or {}).get("instructorFeedback")
             ),
-            "submission_page": submission_page,
+            "answers": answer_results,
         }
 
     @staticmethod
@@ -1584,61 +1730,6 @@ class CourseDownloader:
             self.stats["failed"] += 1
             self.status(f"          FAILED (submission): {filename} - {info}")
 
-    def _capture_submission_html(self, course_id, content_id, grade_id,
-                                 attempt_id, dir_path, folder_name, title):
-        if self.driver is None:
-            return None
-        url = (
-            f"{self.client.base}/ultra/courses/{course_id}/grades/"
-            "student-submission-view"
-            f"?contentId={content_id}&gradeId={grade_id}&attemptId={attempt_id}"
-        )
-        panel = None
-        try:
-            self.driver.get(url)
-            deadline = time.time() + 30
-            while time.time() < deadline:
-                candidate = self.driver.execute_script(
-                    "const p=document.querySelector("
-                    "'.student-view-submission-panel');"
-                    "if(!p) return null;"
-                    "const c=p.cloneNode(true);"
-                    "const base=document.baseURI;"
-                    "c.querySelectorAll('[href]').forEach(el=>{"
-                    "try{el.setAttribute('href',"
-                    "new URL(el.getAttribute('href'),base).href)}catch(e){}});"
-                    "c.querySelectorAll('[src]').forEach(el=>{"
-                    "try{el.setAttribute('src',"
-                    "new URL(el.getAttribute('src'),base).href)}catch(e){}});"
-                    "return c.outerHTML;"
-                )
-                if candidate and (
-                    "Final Grade" in candidate or len(candidate) > 5000
-                ):
-                    panel = candidate
-                    break
-                time.sleep(1)
-        except WebDriverException as exc:
-            self.status(f"          - submission page failed: {exc}")
-            return None
-        if not panel or len(panel) < 3000:
-            self.status("          - no rendered submission panel found")
-            return None
-
-        panel = self._embed_images(self._embed_image_links(panel))
-        filename = f"{folder_name}_submission.html"
-        try:
-            with open(
-                os.path.join(dir_path, filename), "w", encoding="utf-8"
-            ) as handle:
-                handle.write(html_document(f"{title} — Submission", panel))
-            self.stats["documents"] += 1
-            self.status(f"          SUBMISSION PAGE: {filename}")
-            return filename
-        except OSError as exc:
-            self.status(f"          - could not save submission page: {exc}")
-            return None
-
     def _image_data_uri(self, url):
         if url in self._image_cache:
             return self._image_cache[url]
@@ -1743,55 +1834,197 @@ class CourseDownloader:
         html = absolutize_html(html, self.client.base)
         return self._embed_images(self._embed_image_links(html))
 
+    def _answer_html(self, value):
+        if value is None or value == "" or value == []:
+            return '<span class="muted">No answer</span>'
+        if isinstance(value, dict):
+            text = html_from_field(value)
+            return self._prepare_html(text) if text else (
+                '<span class="muted">No answer</span>'
+            )
+        if isinstance(value, list):
+            parts = []
+            for item in value:
+                if isinstance(item, dict):
+                    text = html_from_field(item) or item.get("label") or ""
+                    parts.append(self._prepare_html(text))
+                else:
+                    parts.append(self._prepare_html(str(item)))
+            return "<br>".join(p for p in parts if p) or (
+                '<span class="muted">No answer</span>'
+            )
+        text = str(value)
+        if "<" in text and ">" in text:
+            return self._prepare_html(text)
+        return f'<div class="answer-text">{html_escape(text)}</div>'
+
+    @staticmethod
+    def _question_badge(result):
+        if result.get("correct") is True:
+            return "Correct", "result-correct"
+        if result.get("partiallyCorrect"):
+            return "Partially correct", "result-partial"
+        if result.get("correct") is False:
+            return "Incorrect", "result-incorrect"
+        return "Answered", "result-submitted"
+
+    def _render_questions(self, answers):
+        if not answers:
+            return ""
+        blocks = []
+        number = 0
+        for result in answers:
+            question = result.get("question") or {}
+            qtype = (question.get("questionType") or "").strip().lower()
+            if qtype == "presentation":
+                continue
+            number += 1
+            badge, badge_class = self._question_badge(result)
+            points = question.get("points")
+            head = [
+                '<div class="question-head">',
+                f'<span class="qnumber">Question {number}</span>',
+                f'<span class="qtype">{html_escape(pretty_status(qtype) or "Question")}</span>',
+                f'<span class="result {badge_class}">{html_escape(badge)}</span>',
+            ]
+            if points is not None:
+                head.append(
+                    f'<span class="points">{points:g} pts possible</span>'
+                )
+            head.append("</div>")
+            title = question.get("title")
+            question_html = self._prepare_html(question.get("questionText"))
+            parts = ["<article class=\"question\">"] + head
+            if title:
+                parts.append(
+                    f'<div class="qtitle">{html_escape(title)}</div>'
+                )
+            parts.append(
+                '<div class="qtext">'
+                + (question_html or '<p class="muted">No question text.</p>')
+                + "</div>"
+            )
+            parts.append(
+                '<div class="answer-block">'
+                '<div class="answer-label">Your answer</div>'
+                + self._answer_html(result.get("givenAnswer"))
+                + "</div>"
+            )
+            if (result.get("isCorrectAnswersVisible")
+                    and question.get("answerValue") is not None):
+                value = question.get("answerValue")
+                tolerance = question.get("toleranceValue")
+                correct_text = f"{value}"
+                if tolerance:
+                    correct_text += f" ± {tolerance}"
+                parts.append(
+                    '<div class="correct-answer">'
+                    '<span class="answer-label">Correct answer</span> '
+                    f"{html_escape(correct_text)}</div>"
+                )
+            if result.get("isFeedbackVisible"):
+                key = (
+                    "correctResponseFeedback"
+                    if result.get("correct")
+                    else "incorrectResponseFeedback"
+                )
+                feedback = html_from_field(question.get(key))
+                if feedback:
+                    parts.append(
+                        f'<div class="qfeedback">{self._prepare_html(feedback)}</div>'
+                    )
+            parts.append("</article>")
+            blocks.append("\n".join(parts))
+        return "\n".join(blocks)
+
     def _write_assessment_info(self, dir_path, folder_name, title, info):
         info_filename = f"{folder_name}_assessment_info.html"
-        submission_filename = info.get("submission_page")
+        status = info.get("status") or "Unknown"
+        status_key = status.lower().replace(" ", "-")
+        status_class = {
+            "graded": "graded",
+            "submitted": "submitted",
+            "needs-grading": "needs-grading",
+            "not-submitted": "not-submitted",
+            "no-gradebook-entry": "no-grade",
+        }.get(status_key, "other")
         rows = (
-            ("Status", info.get("status")),
-            ("Score", info.get("score")),
-            ("Submitted", info.get("submitted")),
-            ("Due", info.get("due")),
+            ("Submitted", format_ts(info.get("submitted"))),
+            ("Due", format_ts(info.get("due"))),
             ("Attempt", info.get("attempt")),
             ("Attempts", info.get("attempts")),
             ("Receipt", info.get("receipt")),
-            ("Last graded", info.get("graded")),
+            ("Last graded", format_ts(info.get("graded"))),
         )
-        body = ["<table>"]
-        for label, value in rows:
-            body.append(
-                f"<tr><th>{html_escape(label)}</th>"
-                f"<td>{html_escape(str(value or '—'))}</td></tr>"
-            )
-        body.append("</table>")
-        body.append("<h2>Instructions</h2>")
+        meta = "\n".join(
+            f'<div><div class="label">{html_escape(label)}</div>'
+            f'<div class="value">{html_escape(str(value or "—"))}</div></div>'
+            for label, value in rows
+        )
         instructions = self._prepare_html(info.get("instructions"))
-        body.append(instructions or "<p>No instructions provided.</p>")
-        body.append("<h2>Instructor Feedback</h2>")
         feedback = self._prepare_html(info.get("feedback"))
-        body.append(feedback or "<p>No instructor feedback.</p>")
-        body.append("<h2>Files</h2>")
-        files = []
-        for name in sorted(os.listdir(dir_path)):
-            if name in (info_filename, submission_filename):
-                continue
-            if os.path.isfile(os.path.join(dir_path, name)):
-                files.append(name)
+        files = [
+            name
+            for name in sorted(os.listdir(dir_path))
+            if name != info_filename
+            and os.path.isfile(os.path.join(dir_path, name))
+        ]
         if files:
-            body.append("<ul>")
-            for name in files:
-                body.append(
-                    f'<li><a href="{quote(name)}">{html_escape(name)}</a></li>'
-                )
-            body.append("</ul>")
+            file_section = "<ul>\n" + "\n".join(
+                f'<li><a href="{quote(name)}">{html_escape(name)}</a></li>'
+                for name in files
+            ) + "\n</ul>"
         else:
-            body.append("<p>No files.</p>")
-        if submission_filename:
-            body.append(
-                f'<p><a href="{quote(submission_filename)}">'
-                "Open submission page</a></p>"
+            file_section = '<p class="muted">No files.</p>'
+
+        questions_html = self._render_questions(info.get("answers"))
+
+        sections = []
+        if instructions:
+            sections.append(
+                '<section class="card"><h2>Instructions</h2>\n'
+                + instructions
+                + "\n</section>"
             )
-        document = html_document(
-            f"{title} — Assessment Info", "\n".join(body)
+        if feedback:
+            sections.append(
+                '<section class="card"><h2>Instructor Feedback</h2>\n'
+                + feedback
+                + "\n</section>"
+            )
+        if questions_html:
+            sections.append(
+                '<section class="card"><h2>Submission</h2>\n'
+                + questions_html
+                + "\n</section>"
+            )
+        sections.append(
+            '<section class="card files"><h2>Files</h2>\n'
+            + file_section
+            + "\n</section>"
+        )
+        document = (
+            "<!DOCTYPE html>\n"
+            '<html lang="en"><head><meta charset="utf-8">'
+            '<meta name="viewport" content="width=device-width, initial-scale=1">'
+            f"<title>{html_escape(title)} — Assessment Info</title>\n"
+            "<style>\n" + ASSESSMENT_INFO_CSS + "</style>\n"
+            '<script async src="https://cdn.jsdelivr.net/npm/mathjax@3/'
+            'es5/tex-mml-chtml.js"></script>\n'
+            "</head><body>\n"
+            '<main class="page">\n'
+            '<header class="hero">\n'
+            '<div class="eyebrow">Assessment</div>\n'
+            f"<h1>{html_escape(title)}</h1>\n"
+            '<div class="hero-row">\n'
+            f'<span class="badge {status_class}">{html_escape(status)}</span>\n'
+            f'<span class="score">{html_escape(str(info.get("score") or "—"))}'
+            "</span>\n"
+            "</div>\n</header>\n"
+            f'<section class="meta">\n{meta}\n</section>\n'
+            + "\n".join(sections)
+            + "\n</main>\n"
+            "</body></html>\n"
         )
         try:
             with open(
