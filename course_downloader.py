@@ -2106,15 +2106,19 @@ class CourseDownloader:
     def _handle_other(self, course_id, item, title, dir_path):
         url = None
         for link in item.get("links") or []:
-            if link.get("href"):
-                url = link["href"]
+            href = link.get("href")
+            if href:
+                url = href
                 break
-        if url and url.startswith("/"):
-            url = self.client.base + url
-        self._write_url(
-            dir_path, title,
-            url or f"{self.client.base}/ultra/courses/{course_id}/outline",
-        )
+        if not url:
+            self.status(f"        - No direct link: {title}")
+            return
+        url = normalize_url(url, self.client.base)
+        outline = f"{self.client.base}/ultra/courses/{course_id}/outline"
+        if url.rstrip("/") == outline.rstrip("/"):
+            self.status(f"        - Generic outline link skipped: {title}")
+            return
+        self._write_url(dir_path, title, url)
 
     # ---------------------------------------------------------- attachments
     def _download_attachments(self, course_id, content_id, dir_path, title):
