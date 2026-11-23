@@ -1,13 +1,14 @@
 """
-KFUPM Blackboard Ultra Course Downloader
-========================================
+Blackboard Ultra Course Downloader
+==================================
 
-A desktop tool that logs into KFUPM Blackboard Ultra (SAML SSO) and downloads entire
-courses to your computer, preserving the original folder structure.
+A desktop tool that logs into a Blackboard Ultra instance (SAML SSO) and
+downloads entire courses to your computer, preserving the original folder
+structure. Supported schools are listed in SCHOOLS below (KFUPM by default).
 
 This version targets **Blackboard Ultra** (the previous version targeted
 Blackboard Classic).  Login is done through the browser with Selenium so the
-KFUPM Single Sign-On (WSO2 / SAML) flow keeps working; all course data is then
+institution's Single Sign-On / SAML flow keeps working; all course data is then
 read through the public Blackboard Learn REST API, which is far faster and more
 reliable than scraping the rendered Ultra pages.
 
@@ -58,8 +59,30 @@ from webdriver_manager.chrome import ChromeDriverManager
 # Constants
 # =========================================================================== #
 
-BASE_URL = "https://blackboard.kfupm.edu.sa/"
-ULTRA_HOME = BASE_URL + "ultra/"
+DEFAULT_SCHOOL = "KFUPM"
+
+# One preset per supported institution. Adding a school means adding its base
+# URL and the .env key spellings it uses; some SSO pages may need extra
+# selectors in login() below.
+SCHOOLS = {
+    "KFUPM": {
+        "base_url": "https://blackboard.kfupm.edu.sa/",
+        "user_keys": ("user", "username", "bb_username",
+                      "kfupm_username", "kfupm_user"),
+        "pass_keys": ("password", "pass", "bb_password",
+                      "kfupm_password", "kfupmpassword"),
+    },
+    "IAU": {
+        "base_url": "https://vle.iau.edu.sa/",
+        # IAU shows Student/Faculty links first instead of redirecting to SAML.
+        "login_url": "https://vle.iau.edu.sa/auth-saml/saml/login"
+                     "?apId=_179_1&redirectUrl=https://vle.iau.edu.sa/ultra",
+        "user_keys": ("iau_user", "iau_username"),
+        "pass_keys": ("iaupassword", "iau_password"),
+    },
+}
+
+BASE_URL = SCHOOLS[DEFAULT_SCHOOL]["base_url"]
 API_ROOT = "/learn/api/public/v1"
 
 CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".kfupm_bb_downloader")
@@ -192,6 +215,13 @@ def write_url_file(path, url):
         handle.write("[InternetShortcut]\nURL=" + url + "\n")
 
 
+def default_download_path(school=DEFAULT_SCHOOL, on_desktop=True):
+    root = os.path.expanduser("~")
+    if on_desktop:
+        root = os.path.join(root, "Desktop")
+    return os.path.join(root, f"{school}_Blackboard_Downloads")
+
+
 def find_env_file():
     """Locate a local .env next to the script (or in the working directory)."""
     candidates = [
@@ -207,12 +237,14 @@ def find_env_file():
     return None
 
 
-def load_env_credentials():
-    """Read username/password from a local .env file, if one exists.
+def load_env_credentials(school=DEFAULT_SCHOOL):
+    """Read the selected school's username/password from a local .env file.
 
-    Accepts common key spellings (case-insensitive) and tolerates spaces around
-    the `=` sign, e.g. `User = 123456` / `Password = secret`.
+    Accepts the key spellings declared in SCHOOLS (case-insensitive) and
+    tolerates spaces around the `=` sign, e.g. `User = 123456` or
+    `IAUPassword = secret`.
     """
+    preset = SCHOOLS.get(school, SCHOOLS[DEFAULT_SCHOOL])
     path = find_env_file()
     if not path:
         return {}
@@ -226,9 +258,9 @@ def load_env_credentials():
                 key, value = line.split("=", 1)
                 key = key.strip().lower()
                 value = value.strip().strip('"').strip("'")
-                if key in ("user", "username", "bb_username", "kfupm_username"):
+                if key in preset["user_keys"]:
                     values.setdefault("username", value)
-                elif key in ("password", "pass", "bb_password", "kfupm_password"):
+                elif key in preset["pass_keys"]:
                     values.setdefault("password", value)
     except OSError:
         return {}
@@ -379,7 +411,7 @@ def _click_element(driver, element):
 
 def _click_submit(driver):
     selectors = [
-        (By.ID, "submitButton"),          # KFUPM ADFS (a <span>, not a button)
+        (By.ID, "submitButton"),          # Microsoft ADFS (a <span>, not a button)
         (By.ID, "login-button"),
         (By.CSS_SELECTOR, 'span[role="button"]'),
         (By.CSS_SELECTOR, 'button[type="submit"]'),
@@ -406,15 +438,14 @@ def _click_submit(driver):
     return False
 
 
-def _looks_logged_in(driver):
-    """True once the browser is back on the Blackboard Ultra site."""
+def _looks_logged_in(driver, base_url=BASE_URL):
+    """True once the browser is back on the selected Blackboard Ultra site."""
     try:
         url = driver.current_url or ""
     except WebDriverException:
         return False
-    if "blackboard.kfupm.edu.sa" not in url:
-        return False
-    if "login.kfupm.edu.sa" in url:
+    host = urlparse(base_url).hostname or ""
+    if urlparse(url).hostname != host:
         return False
     if not ("/ultra" in url or "/webapps" in url or "/learn" in url):
         return False
@@ -427,16 +458,19 @@ def _looks_logged_in(driver):
     return True
 
 
-def login(driver, username, password, status_callback, timeout=240):
-    """Log into KFUPM Blackboard through the WSO2 SAML SSO flow.
+def login(driver, username, password, status_callback, school=DEFAULT_SCHOOL,
+          timeout=240):
+    """Log into Blackboard through the institution's SAML SSO flow.
 
     Returns the list of browser cookies for the Blackboard domain.
     """
+    preset = SCHOOLS.get(school, SCHOOLS[DEFAULT_SCHOOL])
+    base_url = preset["base_url"]
     status_callback("Opening Blackboard Ultra and starting SSO login...")
-    driver.get(ULTRA_HOME)
+    driver.get(preset.get("login_url") or base_url.rstrip("/") + "/ultra/")
 
     username_selectors = [
-        (By.ID, "userNameInput"),          # KFUPM ADFS
+        (By.ID, "userNameInput"),          # Microsoft ADFS (KFUPM, IAU, ...)
         (By.NAME, "UserName"),
         (By.ID, "username"),
         (By.NAME, "username"),
@@ -450,7 +484,7 @@ def login(driver, username, password, status_callback, timeout=240):
         (By.CSS_SELECTOR, 'input[type="text"]'),
     ]
     password_selectors = [
-        (By.ID, "passwordInput"),          # KFUPM ADFS
+        (By.ID, "passwordInput"),          # Microsoft ADFS (KFUPM, IAU, ...)
         (By.NAME, "Password"),
         (By.ID, "password"),
         (By.NAME, "password"),
@@ -459,6 +493,7 @@ def login(driver, username, password, status_callback, timeout=240):
         (By.CSS_SELECTOR, 'input[id*="pass" i]'),
     ]
 
+    bb_host = urlparse(base_url).hostname or ""
     deadline = time.time() + timeout
     last_url = ""
     username_entered = False
@@ -466,7 +501,7 @@ def login(driver, username, password, status_callback, timeout=240):
     password_attempts = 0
 
     while time.time() < deadline:
-        if _looks_logged_in(driver):
+        if _looks_logged_in(driver, base_url):
             status_callback("Login successful. Landed on Blackboard Ultra.")
             return driver.get_cookies()
 
@@ -474,6 +509,7 @@ def login(driver, username, password, status_callback, timeout=240):
             current_url = driver.current_url
         except WebDriverException:
             current_url = ""
+        current_host = urlparse(current_url).hostname or ""
         if current_url != last_url:
             status_callback(f"  - at: {current_url}")
             last_url = current_url
@@ -514,8 +550,8 @@ def login(driver, username, password, status_callback, timeout=240):
             if _click_submit(driver):
                 status_callback("  - submitted username")
                 time.sleep(1)
-        elif not clicked_continue and "login.kfupm.edu.sa" in current_url:
-            # Consent / "continue" style page with no fields.
+        elif not clicked_continue and current_host and current_host != bb_host:
+            # Consent / "continue" style page on the SSO host, with no fields.
             if _click_submit(driver):
                 status_callback("  - clicked continue")
                 clicked_continue = True
@@ -557,7 +593,7 @@ class UltraClient:
                 "User-Agent": (
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                     "(KHTML, like Gecko) Chrome/124.0 Safari/537.36 "
-                    "KFUPM-BB-Ultra-Downloader/2.0"
+                    "BB-Ultra-Downloader/2.0"
                 ),
                 "Accept": "application/json",
             }
@@ -1050,7 +1086,7 @@ class CourseDownloader:
 
     def _handle_assessment(self, course_id, item, title, dir_path):
         self.status(f"        Assessment/Assignment: {title}")
-        outline_url = f"{BASE_URL}ultra/courses/{course_id}/outline"
+        outline_url = f"{self.client.base}/ultra/courses/{course_id}/outline"
         self._write_url(dir_path, title, outline_url)
         self._download_attachments(course_id, item.get("id"), dir_path, title)
 
@@ -1061,9 +1097,10 @@ class CourseDownloader:
                 url = link["href"]
                 break
         if url and url.startswith("/"):
-            url = BASE_URL.rstrip("/") + url
+            url = self.client.base + url
         self._write_url(
-            dir_path, title, url or f"{BASE_URL}ultra/courses/{course_id}/outline"
+            dir_path, title,
+            url or f"{self.client.base}/ultra/courses/{course_id}/outline",
         )
 
     # ---------------------------------------------------------- attachments
@@ -1120,7 +1157,7 @@ class CourseDownloader:
             if url.startswith("//"):
                 url = "https:" + url
             elif url.startswith("/"):
-                url = BASE_URL.rstrip("/") + url
+                url = self.client.base + url
             if not url.startswith("http"):
                 continue
 
@@ -1191,7 +1228,7 @@ class CourseDownloader:
         """Best-effort: save the rendered syllabus page if the tenant exposes one."""
         if self.driver is None:
             return
-        url = f"{BASE_URL}ultra/courses/{course_id}/syllabus"
+        url = f"{self.client.base}/ultra/courses/{course_id}/syllabus"
         try:
             self.driver.get(url)
             time.sleep(3)
@@ -1226,14 +1263,15 @@ class CourseDownloader:
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("KFUPM Blackboard Ultra Course Downloader")
-        self.geometry("720x1060")
+        self.title(f"{DEFAULT_SCHOOL} Blackboard Ultra Course Downloader")
+        self.geometry("720x1100")
         self.resizable(0, 0)
 
         self.all_course_data = []
         self.course_checkboxes = []
         self._save_timer = None
-        self._env_credentials = load_env_credentials()
+        self._current_school = DEFAULT_SCHOOL
+        self._env_credentials = {}
 
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(0, weight=1)
@@ -1249,6 +1287,18 @@ class App(ctk.CTk):
         main_frame.grid_columnconfigure(0, weight=0)
         main_frame.grid_columnconfigure(1, weight=1)
         main_frame.grid_columnconfigure(2, weight=0)
+
+        # School
+        ctk.CTkLabel(main_frame, text="School", font=self.header_font,
+                     text_color=("gray10", "gray90")).grid(
+            row=row_idx, column=0, sticky="w", pady=(0, 5))
+        self.school_var = tk.StringVar(value=DEFAULT_SCHOOL)
+        self.school_menu = ctk.CTkOptionMenu(
+            main_frame, values=list(SCHOOLS), variable=self.school_var,
+            command=self.change_school, font=self.main_font)
+        self.school_menu.grid(row=row_idx, column=1, columnspan=2, sticky="ew",
+                              pady=(0, 5), padx=(5, 0))
+        row_idx += 1
 
         # Username
         ctk.CTkLabel(main_frame, text="Username", font=self.header_font,
@@ -1279,10 +1329,7 @@ class App(ctk.CTk):
         ctk.CTkLabel(path_frame, text="Download To", font=self.header_font,
                      text_color=("gray10", "gray90")).grid(
             row=0, column=0, sticky="w", padx=(0, 5))
-        self.path_var = tk.StringVar(
-            value=os.path.join(os.path.expanduser("~"), "Desktop",
-                               "KFUPM_Blackboard_Downloads")
-        )
+        self.path_var = tk.StringVar(value=default_download_path(DEFAULT_SCHOOL))
         self.path_entry = ctk.CTkEntry(path_frame, textvariable=self.path_var,
                                        font=self.main_font)
         self.path_entry.grid(row=0, column=1, sticky="ew", padx=(5, 5))
@@ -1404,12 +1451,10 @@ class App(ctk.CTk):
                                pady=(5, 10))
         self.progress_bar.set(0)
 
-        main_frame.rowconfigure(8, weight=1)   # course list
-        main_frame.rowconfigure(10, weight=1)  # status log
+        main_frame.rowconfigure(9, weight=1)   # course list
+        main_frame.rowconfigure(11, weight=1)  # status log
 
         self.load_credentials()
-        if self._env_credentials.get("username"):
-            self.update_status("Loaded credentials from .env")
         for widget in (self.username_entry, self.password_entry, self.path_entry):
             widget.bind("<KeyRelease>", lambda e: self.save_credentials_throttled())
 
@@ -1422,13 +1467,25 @@ class App(ctk.CTk):
     def save_credentials(self):
         try:
             os.makedirs(CONFIG_DIR, exist_ok=True)
+            existing = self._read_config()
             # If credentials come from .env, keep them out of config.ini.
             has_env_creds = bool(self._env_credentials.get("username"))
+            slug = self._current_school.lower()
             with open(CONFIG_FILE, "w", encoding="utf-8") as handle:
+                handle.write(f"school={self._current_school}\n")
                 if not has_env_creds:
-                    handle.write(f"username={self.username_entry.get()}\n")
+                    handle.write(f"{slug}_username={self.username_entry.get()}\n")
                     # Stored in plain text for local convenience only.
-                    handle.write(f"password={self.password_entry.get()}\n")
+                    handle.write(f"{slug}_password={self.password_entry.get()}\n")
+                # Keep the other schools' saved credentials.
+                for other in SCHOOLS:
+                    other = other.lower()
+                    if other == slug:
+                        continue
+                    for suffix in ("username", "password"):
+                        key = f"{other}_{suffix}"
+                        if key in existing:
+                            handle.write(f"{key}={existing[key]}\n")
                 handle.write(f"download_path={self.path_var.get()}\n")
                 handle.write(f"browser_choice={self.browser_var.get()}\n")
                 handle.write(f"headless_mode={self.headless_var.get()}\n")
@@ -1439,43 +1496,81 @@ class App(ctk.CTk):
         except OSError as exc:
             self.update_status(f"Warning: Could not save settings: {exc}")
 
-    def load_credentials(self):
-        # .env credentials take priority over anything saved in config.ini.
-        if self._env_credentials.get("username"):
-            self.username_entry.insert(0, self._env_credentials["username"])
-        if self._env_credentials.get("password"):
-            self.password_entry.insert(0, self._env_credentials["password"])
-
+    def _read_config(self):
+        values = {}
         try:
             if not os.path.exists(CONFIG_FILE):
-                return
+                return values
             with open(CONFIG_FILE, "r", encoding="utf-8") as handle:
                 for line in handle:
                     if "=" not in line:
                         continue
                     name, value = line.strip().split("=", 1)
-                    if name == "username":
-                        if not self._env_credentials.get("username"):
-                            self.username_entry.insert(0, value)
-                    elif name == "password":
-                        if not self._env_credentials.get("password"):
-                            self.password_entry.insert(0, value)
-                    elif name == "download_path":
-                        self.path_var.set(value)
-                    elif name == "browser_choice":
-                        self.browser_var.set(value)
-                    elif name == "headless_mode":
-                        self.headless_var.set(value.lower() == "true")
-                    elif name == "documents":
-                        self.documents_var.set(value.lower() == "true")
-                    elif name == "links":
-                        self.links_var.set(value.lower() == "true")
-                    elif name == "announcements":
-                        self.announcements_var.set(value.lower() == "true")
-                    elif name == "syllabus":
-                        self.syllabus_var.set(value.lower() == "true")
+                    values[name] = value
         except (OSError, ValueError) as exc:
             self.update_status(f"Warning: Could not load saved settings: {exc}")
+        return values
+
+    def _fill_credentials(self, values):
+        school = self._current_school
+        slug = school.lower()
+        # .env credentials take priority over anything saved in config.ini.
+        self._env_credentials = load_env_credentials(school)
+        self.username_entry.delete(0, "end")
+        self.password_entry.delete(0, "end")
+
+        username = self._env_credentials.get("username")
+        password = self._env_credentials.get("password")
+        if username is None:
+            username = values.get(f"{slug}_username", "")
+            if not username and school == DEFAULT_SCHOOL:
+                username = values.get("username", "")  # legacy config key
+        if password is None:
+            password = values.get(f"{slug}_password", "")
+            if not password and school == DEFAULT_SCHOOL:
+                password = values.get("password", "")  # legacy config key
+        self.username_entry.insert(0, username)
+        self.password_entry.insert(0, password)
+        if self._env_credentials.get("username"):
+            self.update_status(f"Loaded {school} credentials from .env")
+
+    def load_credentials(self):
+        values = self._read_config()
+        school = values.get("school", DEFAULT_SCHOOL)
+        if school not in SCHOOLS:
+            school = DEFAULT_SCHOOL
+        self._current_school = school
+        self.school_var.set(school)
+        self._fill_credentials(values)
+        self.title(f"{school} Blackboard Ultra Course Downloader")
+
+        self.path_var.set(values.get("download_path") or default_download_path(school))
+        if "browser_choice" in values:
+            self.browser_var.set(values["browser_choice"])
+        if "headless_mode" in values:
+            self.headless_var.set(values["headless_mode"].lower() == "true")
+        for name, var in (
+            ("documents", self.documents_var),
+            ("links", self.links_var),
+            ("announcements", self.announcements_var),
+            ("syllabus", self.syllabus_var),
+        ):
+            if name in values:
+                var.set(values[name].lower() == "true")
+
+    def change_school(self, school):
+        if school == self._current_school:
+            return
+        old_default = default_download_path(self._current_school)
+        self.save_credentials()
+        self._current_school = school
+        self.school_var.set(school)
+        self._fill_credentials(self._read_config())
+        self.title(f"{school} Blackboard Ultra Course Downloader")
+        if os.path.normpath(self.path_var.get()) == os.path.normpath(old_default):
+            self.path_var.set(default_download_path(school))
+        self.save_credentials()
+        self.update_status(f"School set to {school}.")
 
     def browse_directory(self):
         directory = filedialog.askdirectory(initialdir=self.path_var.get())
@@ -1516,9 +1611,9 @@ class App(ctk.CTk):
     def set_ui_state(self, enabled):
         state = "normal" if enabled else "disabled"
         widgets = [
-            self.username_entry, self.password_entry, self.path_entry,
-            self.browse_button, self.scan_button, self.headless_check,
-            self.firefox_rb, self.chrome_rb,
+            self.school_menu, self.username_entry, self.password_entry,
+            self.path_entry, self.browse_button, self.scan_button,
+            self.headless_check, self.firefox_rb, self.chrome_rb,
         ]
         for widget in widgets:
             if widget is None:
@@ -1560,8 +1655,10 @@ class App(ctk.CTk):
             driver = setup_driver(
                 self.browser_var.get(), self.update_status, self.headless_var.get()
             )
-            cookies = login(driver, username, password, self.update_status)
-            client = UltraClient(BASE_URL, cookies, self.update_status, driver=driver)
+            school = self.school_var.get()
+            base_url = SCHOOLS[school]["base_url"]
+            cookies = login(driver, username, password, self.update_status, school)
+            client = UltraClient(base_url, cookies, self.update_status, driver=driver)
             self.all_course_data = list_terms_and_courses(client, self.update_status)
 
             if self.all_course_data:
@@ -1669,8 +1766,10 @@ class App(ctk.CTk):
             driver = setup_driver(
                 self.browser_var.get(), self.update_status, self.headless_var.get()
             )
-            cookies = login(driver, username, password, self.update_status)
-            client = UltraClient(BASE_URL, cookies, self.update_status, driver=driver)
+            school = self.school_var.get()
+            base_url = SCHOOLS[school]["base_url"]
+            cookies = login(driver, username, password, self.update_status, school)
+            client = UltraClient(base_url, cookies, self.update_status, driver=driver)
             client.wait_until_authenticated()
             downloader = CourseDownloader(client, driver, self.update_status, options)
 
@@ -1737,10 +1836,13 @@ class App(ctk.CTk):
 
 def build_cli_parser():
     parser = argparse.ArgumentParser(
-        description="KFUPM Blackboard Ultra Course Downloader"
+        description="Blackboard Ultra Course Downloader"
     )
     parser.add_argument("--cli", action="store_true",
                         help="Run headless in the terminal (no GUI)")
+    parser.add_argument("--school", default=DEFAULT_SCHOOL, type=str.upper,
+                        choices=list(SCHOOLS),
+                        help=f"Institution to log into (default: {DEFAULT_SCHOOL})")
     parser.add_argument("--list", action="store_true",
                         help="List matching courses and exit without downloading")
     parser.add_argument("--term", default=None,
@@ -1766,25 +1868,26 @@ def run_cli(args):
     def log(message):
         print(message, flush=True)
 
-    credentials = load_env_credentials()
+    school = args.school
+    base_url = SCHOOLS[school]["base_url"]
+    credentials = load_env_credentials(school)
     username = os.environ.get("BB_USERNAME") or credentials.get("username")
     password = os.environ.get("BB_PASSWORD") or credentials.get("password")
     if not username or not password:
-        log("ERROR: no credentials found. Add 'User'/'Password' to .env "
-            "or set BB_USERNAME/BB_PASSWORD.")
+        log(f"ERROR: no {school} credentials found. Add that school's keys to "
+            ".env or set BB_USERNAME/BB_PASSWORD.")
         return 2
 
-    dest = args.dest or os.path.join(
-        os.path.expanduser("~"), "KFUPM_Blackboard_Downloads"
-    )
+    dest = args.dest or default_download_path(school, on_desktop=False)
     os.makedirs(dest, exist_ok=True)
+    log(f"School: {school} ({base_url})")
     log(f"Destination: {dest}")
 
     driver = None
     try:
         driver = setup_driver(args.browser, log, headless=not args.show_browser)
-        cookies = login(driver, username, password, log)
-        client = UltraClient(BASE_URL, cookies, log, driver=driver)
+        cookies = login(driver, username, password, log, school)
+        client = UltraClient(base_url, cookies, log, driver=driver)
         courses = list_terms_and_courses(client, log)
 
         available_terms = sorted({c.get("term", "") for c in courses})
