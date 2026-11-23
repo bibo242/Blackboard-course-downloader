@@ -428,7 +428,27 @@ class AssessmentHelperTests(unittest.TestCase):
                     "correct": True,
                     "isCorrectAnswersVisible": True,
                     "isFeedbackVisible": True,
-                }
+                },
+                {
+                    "question": {
+                        "questionType": "multipleanswer",
+                        "questionText": {"rawText": "<p>Pick the right ones.</p>"},
+                        "points": 5,
+                        "answers": [
+                            {
+                                "answerText": {"rawText": "<p>A</p>"},
+                                "correctAnswer": True,
+                            },
+                            {
+                                "answerText": {"rawText": "<p>B</p>"},
+                                "correctAnswer": False,
+                            },
+                        ],
+                    },
+                    "givenAnswer": [True, False],
+                    "correct": True,
+                    "isCorrectAnswersVisible": True,
+                },
             ],
         }
         with tempfile.TemporaryDirectory() as tmp:
@@ -449,6 +469,11 @@ class AssessmentHelperTests(unittest.TestCase):
             self.assertIn("Your answer", page)
             self.assertIn("Correct answer", page)
             self.assertIn("10 ± 0.1", page)
+            self.assertIn("Multiple answer", page)
+            self.assertIn("Pick the right ones.", page)
+            self.assertIn("Answer options", page)
+            self.assertIn("option-list", page)
+            self.assertIn("option-correct", page)
             self.assertNotIn("Open submission page", page)
 
 

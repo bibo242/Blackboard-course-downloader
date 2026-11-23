@@ -246,6 +246,19 @@ def pretty_status(value):
     return str(value or "").replace("_", " ").strip().title()
 
 
+QUESTION_TYPE_LABELS = {
+    "multipleanswer": "Multiple answer",
+    "multiplechoice": "Multiple choice",
+    "calculatednumeric": "Calculated numeric",
+    "fileupload": "File upload",
+    "shortanswer": "Short answer",
+    "truefalse": "True / false",
+    "eitheror": "Either / or",
+    "fillinmultipleblanks": "Fill in multiple blanks",
+    "matching": "Matching",
+}
+
+
 def format_ts(value):
     """Format an ISO timestamp as a readable UTC value."""
     if not value or value == "—":
@@ -509,6 +522,20 @@ body {
   background: #f8fafc;
   border-left: 3px solid var(--accent);
   border-radius: 6px;
+}
+.option-list { list-style: none; margin: 8px 0 0; padding: 0; }
+.option { display: flex; gap: 8px; padding: 6px 8px; border-radius: 8px; }
+.option.selected { background: #eef2ff; }
+.option.selected:not(.correct) { background: #fee4e2; }
+.option.selected.correct { background: #d1fae5; }
+.option.correct .option-text { color: #065f46; font-weight: 600; }
+.option-mark { width: 1.2em; font-weight: 700; }
+.option-correct {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #065f46;
+  margin-left: 6px;
 }
 .muted { color: var(--muted); }
 @media (max-width: 600px) {
@@ -1868,6 +1895,37 @@ class CourseDownloader:
             return "Incorrect", "result-incorrect"
         return "Answered", "result-submitted"
 
+    def _choice_options_html(self, question, given, show_correct):
+        options = question.get("answers")
+        if not isinstance(options, list) or not isinstance(given, list):
+            return None
+        if len(options) != len(given):
+            return None
+        if not all(isinstance(value, bool) for value in given):
+            return None
+        rows = []
+        for option, selected in zip(options, given):
+            text = html_from_field(option.get("answerText"))
+            text_html = self._prepare_html(text) or "&nbsp;"
+            correct = bool(option.get("correctAnswer")) and show_correct
+            classes = ["option"]
+            if selected:
+                classes.append("selected")
+            if correct:
+                classes.append("correct")
+            mark = "✓" if selected else "&nbsp;"
+            correct_label = (
+                ' <span class="option-correct">correct</span>'
+                if correct else ""
+            )
+            rows.append(
+                f'<li class="{" ".join(classes)}">'
+                f'<span class="option-mark">{mark}</span>'
+                f'<span class="option-text">{text_html}{correct_label}</span>'
+                "</li>"
+            )
+        return '<ul class="option-list">' + "".join(rows) + "</ul>"
+
     def _render_questions(self, answers):
         if not answers:
             return ""
@@ -1881,10 +1939,14 @@ class CourseDownloader:
             number += 1
             badge, badge_class = self._question_badge(result)
             points = question.get("points")
+            type_key = qtype.replace("_", "").replace(" ", "")
+            type_label = QUESTION_TYPE_LABELS.get(
+                type_key, pretty_status(qtype) or "Question"
+            )
             head = [
                 '<div class="question-head">',
                 f'<span class="qnumber">Question {number}</span>',
-                f'<span class="qtype">{html_escape(pretty_status(qtype) or "Question")}</span>',
+                f'<span class="qtype">{html_escape(type_label)}</span>',
                 f'<span class="result {badge_class}">{html_escape(badge)}</span>',
             ]
             if points is not None:
@@ -1904,10 +1966,16 @@ class CourseDownloader:
                 + (question_html or '<p class="muted">No question text.</p>')
                 + "</div>"
             )
+            given = result.get("givenAnswer")
+            choice_html = self._choice_options_html(
+                question, given, bool(result.get("isCorrectAnswersVisible"))
+            )
+            answer_label = "Answer options" if choice_html else "Your answer"
+            answer_html = choice_html or self._answer_html(given)
             parts.append(
                 '<div class="answer-block">'
-                '<div class="answer-label">Your answer</div>'
-                + self._answer_html(result.get("givenAnswer"))
+                f'<div class="answer-label">{answer_label}</div>'
+                + answer_html
                 + "</div>"
             )
             if (result.get("isCorrectAnswersVisible")
