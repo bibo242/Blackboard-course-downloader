@@ -253,5 +253,178 @@ class BrowserFallbackTests(unittest.TestCase):
         self.assertIsNone(client._browser_get_json("https://example.com/api"))
 
 
+class AssessmentHelperTests(unittest.TestCase):
+    def test_submission_suffix(self):
+        self.assertEqual(
+            cd.add_submission_suffix("ME489_HW1.pdf"),
+            "ME489_HW1_submission.pdf",
+        )
+        self.assertEqual(
+            cd.add_submission_suffix("ME489_HW1_submission.pdf"),
+            "ME489_HW1_submission.pdf",
+        )
+        self.assertEqual(cd.add_submission_suffix("archive"), "archive_submission")
+        self.assertEqual(
+            cd.add_submission_suffix("archive.zip"), "archive_submission.zip"
+        )
+
+    def test_html_to_text(self):
+        self.assertEqual(
+            cd.html_to_text("<p>Hello<br>World &amp; more</p>"),
+            "Hello\nWorld & more",
+        )
+        self.assertEqual(cd.html_to_text(""), "")
+
+    def test_html_from_field_accepts_dicts(self):
+        self.assertEqual(
+            cd.html_from_field({"rawText": "<p>Raw</p>"}), "<p>Raw</p>"
+        )
+        self.assertEqual(
+            cd.html_from_field({"displayText": "<p>Display</p>"}),
+            "<p>Display</p>",
+        )
+
+    def test_absolutize_html(self):
+        html = '<a href="/x">x</a><img src="/y.png">'
+        result = cd.absolutize_html(html, "https://example.test/")
+        self.assertIn('href="https://example.test/x"', result)
+        self.assertIn('src="https://example.test/y.png"', result)
+
+    def test_extract_links_with_bbfile_metadata(self):
+        html = (
+            '<p><a href="https://example.test/bbcswebdav/xid-1_1" '
+            'data-bbtype="attachment" '
+            'data-bbfile="{&quot;fileName&quot;:&quot;ME489_HW1.pdf&quot;,'
+            '&quot;mimeType&quot;:&quot;application/pdf&quot;}">'
+            "ME489_HW1.pdf</a></p>"
+        )
+        links = cd.extract_bbcswebdav_links(html)
+        self.assertEqual(len(links), 1)
+        self.assertEqual(links[0]["name"], "ME489_HW1.pdf")
+        self.assertEqual(links[0]["mime"], "application/pdf")
+        self.assertFalse(links[0]["is_image"])
+
+    def test_extract_links_skips_inline_images_by_flag(self):
+        html = '<img src="https://example.test/bbcswebdav/xid-2_1/convert.png">'
+        self.assertEqual(cd.extract_bbcswebdav_links(html), [])
+        links = cd.extract_bbcswebdav_links(html, include_images=True)
+        self.assertEqual(len(links), 1)
+        self.assertTrue(links[0]["is_image"])
+
+    def test_extract_links_unescapes_signed_query(self):
+        html = (
+            '<a href="https://example.test/bbcswebdav/xid-3_1?a=1&amp;b=2">'
+            "file.pdf</a>"
+        )
+        links = cd.extract_bbcswebdav_links(html)
+        self.assertEqual(links[0]["url"], "https://example.test/bbcswebdav/xid-3_1?a=1&b=2")
+
+    def test_assessment_score_and_status(self):
+        self.assertEqual(
+            cd.CourseDownloader._assessment_score(
+                {"id": "_c"}, {"effectiveScore": 55, "pointsPossible": 100}
+            ),
+            "55 / 100",
+        )
+        self.assertEqual(
+            cd.CourseDownloader._assessment_score(
+                {"id": "_c"},
+                {
+                    "effectiveScore": 55,
+                    "pointsPossible": 100,
+                    "displayGrade": {"isOverride": True},
+                },
+            ),
+            "55 / 100 (override)",
+        )
+        self.assertEqual(
+            cd.CourseDownloader._assessment_score(None, None), "—"
+        )
+        self.assertEqual(
+            cd.CourseDownloader._assessment_status(
+                {"id": "_c"}, {"status": "GRADED"}, None
+            ),
+            "Graded",
+        )
+        self.assertEqual(
+            cd.CourseDownloader._assessment_status(
+                {"id": "_c"}, {"effectiveScore": 9.5}, None
+            ),
+            "Graded",
+        )
+        self.assertEqual(
+            cd.CourseDownloader._assessment_status(
+                {"id": "_c"}, {"status": "NEEDS_GRADING"}, {"id": "_a"}
+            ),
+            "Submitted",
+        )
+        self.assertEqual(
+            cd.CourseDownloader._assessment_status({"id": "_c"}, None, None),
+            "Not submitted",
+        )
+        self.assertEqual(
+            cd.CourseDownloader._assessment_status(None, None, None),
+            "No gradebook entry",
+        )
+
+    def test_page_not_found(self):
+        class TitleDriver:
+            title = "Page Not Found"
+
+            def find_elements(self, by, selector):
+                return []
+
+        class CssDriver:
+            title = "Something"
+
+            def find_elements(self, by, selector):
+                return [object()]
+
+        class NormalDriver:
+            title = "Course"
+
+            def find_elements(self, by, selector):
+                return []
+
+        self.assertTrue(cd._page_not_found(TitleDriver()))
+        self.assertTrue(cd._page_not_found(CssDriver()))
+        self.assertFalse(cd._page_not_found(NormalDriver()))
+
+    def test_write_assessment_info(self):
+        client = mock.Mock()
+        client.base = "https://example.test"
+        downloader = cd.CourseDownloader(
+            client=client, driver=None, status_callback=lambda *_: None
+        )
+        info = {
+            "status": "Graded",
+            "score": "55 / 100",
+            "submitted": "2026-09-21T04:58:49.353Z",
+            "due": "2026-09-21T17:59:00.000Z",
+            "attempt": "_647757_1",
+            "attempts": "1",
+            "receipt": "receipt-1",
+            "graded": "2026-10-11T18:18:54.893Z",
+            "instructions": "<p>Do the work &amp; submit.</p>",
+            "feedback": "<p>Good job</p>",
+            "submission_page": "Homework 1_submission.html",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "ME489_HW1.pdf"), "wb") as handle:
+                handle.write(b"pdf")
+            downloader._write_assessment_info(tmp, "Homework 1", "Homework 1", info)
+            path = os.path.join(tmp, "Homework 1_assessment_info.html")
+            self.assertTrue(os.path.exists(path))
+            with open(path, encoding="utf-8") as handle:
+                page = handle.read()
+            self.assertIn("Graded", page)
+            self.assertIn("55 / 100", page)
+            self.assertIn("Do the work &amp; submit.", page)
+            self.assertIn("Good job", page)
+            self.assertIn("ME489_HW1.pdf", page)
+            self.assertIn("Homework%201_submission.html", page)
+            self.assertIn("Open submission page", page)
+
+
 if __name__ == "__main__":
     unittest.main()
