@@ -5,11 +5,11 @@ click. It logs into Blackboard through the institution's Single Sign-On, reads
 every course through the Blackboard Learn REST API, and saves all materials to
 your computer while preserving the original folder structure.
 
-Supported schools: **KFUPM** (default) and **IAU**. See
-[Supported schools](#supported-schools) for adding another one.
+Implemented schools: **KFUPM** (default) and **IAU**. See
+[Implemented schools](#implemented-schools) for details and for adding another
+one.
 
-> This is the Ultra version. The original project targeted Blackboard Classic,
-> which no longer matches KFUPM's current Blackboard.
+> This is the Ultra version; the original project targeted Blackboard Classic.
 
 ---
 
@@ -34,10 +34,9 @@ Supported schools: **KFUPM** (default) and **IAU**. See
 
 ## How it works
 
-1. **Login** is performed in a real browser (Selenium) so the school's SAML
-   Single Sign-On works exactly as it does manually (KFUPM: WSO2 →
-   `login.kfupm.edu.sa`; IAU: `iauauth.iau.edu.sa`). Your credentials are
-   entered into the SSO page; they are not sent anywhere else.
+1. **Login** is performed in a real browser (Selenium) so the institution's
+   SAML/ADFS Single Sign-On works exactly as it does manually. Your credentials
+   are entered into the SSO page; they are not sent anywhere else.
 2. **Course data** is read with the Blackboard Learn REST API
    (`/learn/api/public/v1/...`) using the session cookies from that browser.
    This is much faster and more reliable than scraping Ultra's rendered pages.
@@ -89,20 +88,21 @@ IAUPassword = your-password
 ```
 
 Key names are case-insensitive and only the selected school's keys are read.
-KFUPM accepts `User`/`Password` (plus `Username`, `BB_USERNAME`,
-`KFUPM_USERNAME`, `BB_PASSWORD`, `KFUPM_PASSWORD`, ...); IAU accepts
-`IAU_User`/`IAUPassword` (or `IAU_Username`/`IAU_Password`). Spaces around `=`
-and surrounding quotes are ignored. The app fills the fields on startup and
-keeps those credentials out of `config.ini`.
+Each school declares which spellings it accepts; the table below lists the
+implemented ones. Spaces around `=` and surrounding quotes are ignored. The app
+fills the fields on startup and keeps those credentials out of `config.ini`.
 
 > `.env` is listed in `.gitignore`, so it is never committed. Never share it.
 
-## Supported schools
+## Implemented schools
 
-| School | Blackboard URL | `.env` username | `.env` password |
-|---|---|---|---|
-| **KFUPM** (default) | `https://blackboard.kfupm.edu.sa/` | `User` | `Password` |
-| **IAU** | `https://vle.iau.edu.sa/` | `IAU_User` | `IAUPassword` |
+| School | Default | Blackboard URL | `.env` username | `.env` password |
+|---|---|---|---|---|
+| **KFUPM** | Yes | `https://blackboard.kfupm.edu.sa/` | `User` | `Password` |
+| **IAU** | No | `https://vle.iau.edu.sa/` | `IAU_User` | `IAUPassword` |
+
+The GUI dropdown and the CLI `--school` option list these entries. KFUPM is
+selected on first run; the last choice is remembered in `config.ini`.
 
 The course/content download logic is generic Blackboard Ultra, so adding a
 school is normally just one entry in the `SCHOOLS` dict at the top of
@@ -117,8 +117,13 @@ school is normally just one entry in the `SCHOOLS` dict at the top of
 ```
 
 The login step is the part that varies: it expects a SAML/ADFS-style form with
-username and password fields. Schools using a different SSO (or MFA) may need
-extra selectors or a manual, non-headless login.
+username and password fields. Add `login_url` if the Blackboard landing page
+shows provider links instead of redirecting to SSO (as IAU does). Schools using
+a different SSO or MFA may need extra selectors or a manual, non-headless
+login.
+
+To change the first-run default, edit `DEFAULT_SCHOOL` at the top of
+`course_downloader.py`.
 
 ## Command line
 
